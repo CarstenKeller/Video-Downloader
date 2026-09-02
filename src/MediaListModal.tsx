@@ -10,6 +10,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { formatFileSize } from './mediaScanner';
 import type { MediaItem } from './types';
@@ -34,12 +35,13 @@ export default function MediaListModal({
   onDownload,
 }: Props) {
   const selectedCount = useMemo(() => items.filter((i) => i.selected).length, [items]);
+  const insets = useSafeAreaInsets();
 
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={() => !downloading && onClose()}>
       <View style={styles.backdrop}>
         <Pressable style={StyleSheet.absoluteFill} onPress={() => !downloading && onClose()} />
-        <View style={styles.sheet}>
+        <View style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
           <Text style={styles.title}>Gefundene Medien</Text>
           <Text style={styles.hint}>Gespeichert in Fotos, Album „VideoDownloader“</Text>
 
@@ -139,7 +141,6 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 16,
     borderTopRightRadius: 16,
     paddingTop: 16,
-    paddingBottom: 24,
     paddingHorizontal: 16,
   },
   title: {

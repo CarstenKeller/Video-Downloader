@@ -4,13 +4,13 @@ import {
   Alert,
   BackHandler,
   Platform,
-  SafeAreaView,
   StatusBar,
   StyleSheet,
   TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import WebView, { type WebViewMessageEvent, type WebViewNavigation } from 'react-native-webview';
 
 import { downloadAll } from './src/downloadCoordinator';
@@ -155,74 +155,76 @@ export default function App() {
   }, [items]);
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <StatusBar barStyle="light-content" backgroundColor="#0D47A1" />
-      <View style={styles.toolbar}>
-        <TouchableOpacity
-          style={styles.iconButton}
-          disabled={!canGoBack}
-          onPress={() => webViewRef.current?.goBack()}
-        >
-          <Ionicons name="arrow-back" size={22} color={canGoBack ? '#FFFFFF' : 'rgba(255,255,255,0.4)'} />
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.iconButton}
-          disabled={!canGoForward}
-          onPress={() => webViewRef.current?.goForward()}
-        >
-          <Ionicons name="arrow-forward" size={22} color={canGoForward ? '#FFFFFF' : 'rgba(255,255,255,0.4)'} />
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.iconButton} onPress={() => webViewRef.current?.reload()}>
-          <Ionicons name="refresh" size={20} color="#FFFFFF" />
-        </TouchableOpacity>
+    <SafeAreaProvider>
+      <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
+        <StatusBar barStyle="light-content" backgroundColor="#0D47A1" />
+        <View style={styles.toolbar}>
+          <TouchableOpacity
+            style={styles.iconButton}
+            disabled={!canGoBack}
+            onPress={() => webViewRef.current?.goBack()}
+          >
+            <Ionicons name="arrow-back" size={22} color={canGoBack ? '#FFFFFF' : 'rgba(255,255,255,0.4)'} />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.iconButton}
+            disabled={!canGoForward}
+            onPress={() => webViewRef.current?.goForward()}
+          >
+            <Ionicons name="arrow-forward" size={22} color={canGoForward ? '#FFFFFF' : 'rgba(255,255,255,0.4)'} />
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.iconButton} onPress={() => webViewRef.current?.reload()}>
+            <Ionicons name="refresh" size={20} color="#FFFFFF" />
+          </TouchableOpacity>
 
-        <TextInput
-          style={styles.addressBar}
-          value={addressText}
-          onChangeText={setAddressText}
-          onSubmitEditing={() => navigateTo(addressText)}
-          autoCapitalize="none"
-          autoCorrect={false}
-          keyboardType="url"
-          returnKeyType="go"
-          selectTextOnFocus
+          <TextInput
+            style={styles.addressBar}
+            value={addressText}
+            onChangeText={setAddressText}
+            onSubmitEditing={() => navigateTo(addressText)}
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="url"
+            returnKeyType="go"
+            selectTextOnFocus
+          />
+
+          <TouchableOpacity style={styles.iconButton} onPress={handleScan}>
+            <Ionicons name="search" size={20} color="#FFFFFF" />
+          </TouchableOpacity>
+        </View>
+
+        {loadProgress > 0 && loadProgress < 1 && (
+          <View style={styles.progressTrack}>
+            <View style={[styles.progressFill, { width: `${loadProgress * 100}%` }]} />
+          </View>
+        )}
+
+        <WebView
+          ref={webViewRef}
+          source={{ uri: currentUrl }}
+          style={styles.webView}
+          javaScriptEnabled
+          domStorageEnabled
+          mediaPlaybackRequiresUserAction={false}
+          allowsInlineMediaPlayback
+          mixedContentMode="compatibility"
+          onNavigationStateChange={handleNavigationStateChange}
+          onLoadProgress={({ nativeEvent }) => setLoadProgress(nativeEvent.progress)}
+          onMessage={handleMessage}
         />
 
-        <TouchableOpacity style={styles.iconButton} onPress={handleScan}>
-          <Ionicons name="search" size={20} color="#FFFFFF" />
-        </TouchableOpacity>
-      </View>
-
-      {loadProgress > 0 && loadProgress < 1 && (
-        <View style={styles.progressTrack}>
-          <View style={[styles.progressFill, { width: `${loadProgress * 100}%` }]} />
-        </View>
-      )}
-
-      <WebView
-        ref={webViewRef}
-        source={{ uri: currentUrl }}
-        style={styles.webView}
-        javaScriptEnabled
-        domStorageEnabled
-        mediaPlaybackRequiresUserAction={false}
-        allowsInlineMediaPlayback
-        mixedContentMode="compatibility"
-        onNavigationStateChange={handleNavigationStateChange}
-        onLoadProgress={({ nativeEvent }) => setLoadProgress(nativeEvent.progress)}
-        onMessage={handleMessage}
-      />
-
-      <MediaListModal
-        visible={modalVisible}
-        items={items}
-        downloading={downloading}
-        onClose={() => setModalVisible(false)}
-        onToggle={handleToggle}
-        onSetAll={handleSetAll}
-        onDownload={handleDownload}
-      />
-    </SafeAreaView>
+        <MediaListModal
+          visible={modalVisible}
+          items={items}
+          downloading={downloading}
+          onClose={() => setModalVisible(false)}
+          onToggle={handleToggle}
+          onSetAll={handleSetAll}
+          onDownload={handleDownload}
+        />
+      </SafeAreaView>
+    </SafeAreaProvider>
   );
 }
 
