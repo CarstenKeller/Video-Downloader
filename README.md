@@ -107,14 +107,27 @@ Servers ist nur nach Änderungen an `app.json` oder neu installierten Paketen n�
 
 ## Expo SDK Version
 
-Das Projekt ist auf **Expo SDK 54** fixiert (`expo@~54.0.37`, React Native 0.81.5).
-Grund: Expo Go wird nur mit der jeweils aktuellen SDK-Version über den Play
-Store/App Store verteilt, ältere Expo-Go-Installationen bekommen oft kein Update mehr
-angeboten und bleiben auf einer älteren SDK-Version stehen. Falls „Incompatible SDK
-version“ o. ä. beim Öffnen in Expo Go erscheint: In Expo Go unter „Profile“/„Settings“
-nachsehen, welche SDK-Version dort unterstützt wird, und das Projekt per
-`npx expo install expo@<passende-version>` gefolgt von `npx expo install --fix`
-darauf umstellen.
+Das Projekt ist exakt auf **`expo@54.0.8`** fixiert (React Native 0.81.4, ohne `^`/`~`
+vor der Expo-Version in `package.json`), passend zur installierten Expo-Go-Version.
+
+Wichtig dabei: Es reicht nicht, nur die grobe SDK-Zahl (z. B. „SDK 54“) zu treffen.
+Expo Go wird selbst nicht regelmäßig aktualisiert (Play Store bietet oft kein Update
+mehr an) und bleibt dann auf einem frühen Patch-Release einer SDK-Version stehen (hier:
+`54.0.8`). Ein neuerer `expo`-Patch derselben SDK-Version (z. B. `54.0.37`) kann eine
+neuere native Laufzeit voraussetzen, als der installierte Expo-Go-Client bietet, und
+löst dann „Project is incompatible with this version of Expo Go – this project
+requires a **newer** version of Expo Go“ aus – obwohl beide offiziell „SDK 54“ sind.
+Deshalb ist `expo` hier ohne Versions-Bereich (kein `^54.0.8`) gepinnt, damit ein
+`npm install` nicht versehentlich auf einen neueren 54.x-Patch hochzieht.
+
+Falls das auf einem anderen Gerät/mit einer anderen Expo-Go-Version wieder passiert:
+In Expo Go unter „Profile“/„Settings“ die exakte unterstützte SDK-Version nachsehen,
+dann testweise mit der App-Versionsnummer von Expo Go selbst beginnen (hier stimmten
+Expo-Go-App-Version und benötigter `expo`-Patch zufällig überein: `54.0.8`), per
+`npm install expo@<version>` gefolgt von `npx expo install --fix` (im Zweifel mit
+`EXPO_OFFLINE=1`, falls die Kompatibilitätsabfrage von Expo online fehlschlägt) darauf
+umstellen, danach `rm -rf node_modules package-lock.json && npm install` für einen
+sauberen Stand.
 
 Wichtig: Zwischen SDK-Versionen ändern sich teils auch die APIs von `expo-file-system`
 und `expo-media-library` (nicht nur Versionsnummern) – siehe Kommentare in
