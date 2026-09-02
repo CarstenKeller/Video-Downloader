@@ -105,6 +105,25 @@ ob GIFs und Videos im selben Album landen.
 Jede Codeänderung wird per Fast Refresh sofort in Expo Go sichtbar – ein Neustart des
 Servers ist nur nach Änderungen an `app.json` oder neu installierten Paketen nötig.
 
+## Expo SDK Version
+
+Das Projekt ist auf **Expo SDK 54** fixiert (`expo@~54.0.37`, React Native 0.81.5).
+Grund: Expo Go wird nur mit der jeweils aktuellen SDK-Version über den Play
+Store/App Store verteilt, ältere Expo-Go-Installationen bekommen oft kein Update mehr
+angeboten und bleiben auf einer älteren SDK-Version stehen. Falls „Incompatible SDK
+version“ o. ä. beim Öffnen in Expo Go erscheint: In Expo Go unter „Profile“/„Settings“
+nachsehen, welche SDK-Version dort unterstützt wird, und das Projekt per
+`npx expo install expo@<passende-version>` gefolgt von `npx expo install --fix`
+darauf umstellen.
+
+Wichtig: Zwischen SDK-Versionen ändern sich teils auch die APIs von `expo-file-system`
+und `expo-media-library` (nicht nur Versionsnummern) – siehe Kommentare in
+`src/downloadCoordinator.ts` (nutzt bewusst `expo-file-system/legacy` für den
+Downloadfortschritt, da die neuere `File`/`Paths`-API in SDK 54 noch kein
+`onProgress` unterstützt) und `src/mediaSaver.ts` (nutzt die klassische
+`createAssetAsync`/`getAlbumAsync`/`createAlbumAsync`-API statt der neueren
+`Asset`/`Album`-Klassen).
+
 ## Verifikation in dieser Sandbox
 
 In der Umgebung, in der dieser Code entstanden ist, gab es keinen Zugriff auf ein
@@ -112,7 +131,7 @@ echtes Android-Gerät/Emulator. Was tatsächlich geprüft wurde:
 
 - `npx tsc --noEmit` – TypeScript kompiliert ohne Fehler
 - `npx expo export --platform android` – Metro bündelt das komplette Projekt
-  (704 Module) erfolgreich zu einem lauffähigen Android-Bundle
+  erfolgreich zu einem lauffähigen Android-Bundle
 - `npx expo-doctor` – keine Abhängigkeits- oder Konfigurationsprobleme (die zwei
   verbleibenden Warnungen sind reine Netzwerk-Timeouts beim Erreichen von
   Expo-eigenen Online-Diensten, kein Projektfehler)

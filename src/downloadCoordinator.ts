@@ -1,4 +1,4 @@
-import { File, Paths } from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 
 import { saveToAlbum } from './mediaSaver';
 import type { MediaItem } from './types';
@@ -27,32 +27,30 @@ async function runWorker(queue: MediaItem[], onProgress: ProgressCallback, onDon
 }
 
 async function downloadOne(item: MediaItem, onProgress: ProgressCallback, onDone: DoneCallback): Promise<void> {
-  const destination = new File(Paths.cache, `vd_${Date.now()}_${Math.round(Math.random() * 1e6)}_${item.fileName}`);
+  const destinationUri = `${FileSystem.cacheDirectory}vd_${Date.now()}_${Math.round(Math.random() * 1e6)}_${item.fileName}`;
+
   try {
-    const downloaded = await File.downloadFileAsync(item.url, destination, {
-      idempotent: true,
-      onProgress: ({ bytesWritten, totalBytes }) => {
-        const known = totalBytes > 0 ? totalBytes : item.sizeBytes;
-        const pct = known ? Math.min(100, Math.round((bytesWritten / known) * 100)) : -1;
+    const downloadResumable = FileSystem.createDownloadResumable(
+      item.url,
+      destinationUri,
+      {},
+      ({ totalBytesWritten, totalBytesExpectedToWrite }) => {
+        const known = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : item.sizeBytes;
+        const pct = known ? Math.min(100, Math.round((totalBytesWritten / known) * 100)) : -1;
         onProgress(item.id, pct);
-      },
-    });
+      }
+    );
 
-    await saveToAlbum(downloaded.uri);
+    const result = await downloadResumable.downloadAsync();
+    if (!result) throw new Error('Download abgebrochen');
+    if (result.status < 200 || result.status >= 300) throw new Error(`HTTP ${result.status}`);
 
-    try {
-      downloaded.delete();
-    } catch {
-      // Cleanup of the cache copy is best-effort only.
-    }
+    await saveToAlbum(result.uri);
+    await FileSystem.deleteAsync(result.uri, { idempotent: true });
 
     onDone(item.id, true);
   } catch (e) {
     onDone(item.id, false, e instanceof Error ? e.message : 'Fehler');
-    try {
-      destination.delete();
-    } catch {
-      // Nothing to clean up if the download never started writing.
-    }
+    await FileSystem.deleteAsync(destinationUri, { idempotent: true });
   }
 }

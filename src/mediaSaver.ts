@@ -17,25 +17,20 @@ const ALBUM_NAME = 'VideoDownloader';
  * photo library - just not grouped into that named album for this particular item.
  */
 export async function saveToAlbum(localUri: string): Promise<void> {
-  const existingAlbum = await MediaLibrary.Album.get(ALBUM_NAME);
+  const asset = await MediaLibrary.createAssetAsync(localUri);
+  const existingAlbum = await MediaLibrary.getAlbumAsync(ALBUM_NAME);
 
-  if (existingAlbum) {
-    try {
-      await MediaLibrary.Asset.create(localUri, existingAlbum);
-      return;
-    } catch {
-      // Falls through: album likely already bound to the other media type's folder.
+  try {
+    if (existingAlbum) {
+      // moveAssets=false actually means "move" here (Android only copies when true),
+      // so the asset ends up only inside the album, not duplicated at its default location.
+      await MediaLibrary.addAssetsToAlbumAsync([asset], existingAlbum, false);
+    } else {
+      await MediaLibrary.createAlbumAsync(ALBUM_NAME, asset, false);
     }
-  }
-
-  const asset = await MediaLibrary.Asset.create(localUri);
-
-  if (!existingAlbum) {
-    try {
-      await MediaLibrary.Album.create(ALBUM_NAME, [asset]);
-    } catch {
-      // The asset is still saved to the photo library, just not grouped into the album.
-    }
+  } catch {
+    // Falls through: album likely already bound to the other media type's folder.
+    // The asset itself is still saved to the photo library, just not grouped.
   }
 }
 
