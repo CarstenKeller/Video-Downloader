@@ -11,7 +11,13 @@ data class ScannedMedia(
     // True for a <video> that behaves like a "GIF" (loop + muted, the common pattern sites
     // use to serve GIF-style content as a much smaller video file). Display-only signal -
     // the file itself is still a real video and is saved as one.
-    val looksLikeGif: Boolean = false
+    val looksLikeGif: Boolean = false,
+    // The nearest wrapping <a href> around the found element, when it points somewhere other
+    // than the media file itself - the common pattern for search-result/gallery grids that
+    // link a (often reduced/preview) thumbnail through to its original source page. Used to
+    // opportunistically crawl that page for the real, full file - best-effort: only present
+    // when the page happens to expose such a link at all.
+    val sourceLink: String? = null
 )
 
 /**
@@ -32,13 +38,25 @@ object MediaScanner {
             if (!url) return null;
             try { return new URL(url, doc.baseURI).href; } catch (e) { return null; }
           }
-          function add(src, kind, poster, doc, looksLikeGif) {
+          function add(src, kind, poster, doc, looksLikeGif, sourceLink) {
             var abs = absolutize(src, doc);
             if (!abs) return;
             if (abs.indexOf('blob:') === 0 || abs.indexOf('data:') === 0) return;
             if (seen[abs]) return;
             seen[abs] = true;
-            urls.push({ url: abs, kind: kind, poster: absolutize(poster, doc), looksLikeGif: !!looksLikeGif });
+            urls.push({
+              url: abs, kind: kind, poster: absolutize(poster, doc), looksLikeGif: !!looksLikeGif,
+              sourceLink: (sourceLink && sourceLink !== abs) ? sourceLink : null
+            });
+          }
+          function closestAnchorHref(el, doc) {
+            try {
+              var a = el.closest ? el.closest('a[href]') : null;
+              if (!a) return null;
+              var href = a.getAttribute('href');
+              if (!href || href.indexOf('#') === 0 || href.indexOf('javascript:') === 0) return null;
+              return absolutize(href, doc);
+            } catch (e) { return null; }
           }
           var videoExt = /\.(mp4|webm|mov|m4v|mkv|3gp|avi)(\?|#|${'$'})/i;
           var gifExt = /\.gif(\?|#|${'$'})/i;
@@ -57,14 +75,16 @@ object MediaScanner {
               doc.querySelectorAll('video').forEach(function(v) {
                 var poster = v.getAttribute('poster');
                 var gifLike = v.hasAttribute('loop') && (v.muted || v.hasAttribute('muted'));
-                candidateSrcs(v).forEach(function(src) { add(src, 'video', poster, doc, gifLike); });
+                var link = closestAnchorHref(v, doc);
+                candidateSrcs(v).forEach(function(src) { add(src, 'video', poster, doc, gifLike, link); });
                 v.querySelectorAll('source').forEach(function(s) {
-                  candidateSrcs(s).forEach(function(src) { add(src, 'video', poster, doc, gifLike); });
+                  candidateSrcs(s).forEach(function(src) { add(src, 'video', poster, doc, gifLike, link); });
                 });
               });
               doc.querySelectorAll('img').forEach(function(img) {
+                var link = closestAnchorHref(img, doc);
                 candidateSrcs(img).forEach(function(s) {
-                  if (gifExt.test(s)) add(s, 'gif', null, doc);
+                  if (gifExt.test(s)) add(s, 'gif', null, doc, false, link);
                 });
               });
               doc.querySelectorAll('a[href]').forEach(function(a) {
@@ -110,7 +130,8 @@ object MediaScanner {
             val kind = if (obj.optString("kind") == "gif") MediaKind.GIF else MediaKind.VIDEO
             val poster = obj.optString("poster").takeIf { it.isNotBlank() && it != "null" }
             val looksLikeGif = obj.optBoolean("looksLikeGif", false)
-            result.add(ScannedMedia(url, kind, poster, looksLikeGif))
+            val sourceLink = obj.optString("sourceLink").takeIf { it.isNotBlank() && it != "null" }
+            result.add(ScannedMedia(url, kind, poster, looksLikeGif, sourceLink))
         }
         return result
     }
@@ -140,7 +161,7 @@ object MediaScanner {
         }
     }
 
-    private fun deriveFileName(url: String, kind: MediaKind, fallbackIndex: Int): String {
+    fun deriveFileName(url: String, kind: MediaKind, fallbackIndex: Int): String {
         val defaultExt = if (kind == MediaKind.GIF) "gif" else "mp4"
         val lastSegment = try {
             Uri.parse(url).lastPathSegment?.substringBefore('?')

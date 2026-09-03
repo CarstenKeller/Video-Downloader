@@ -101,6 +101,23 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@id/progressBar" />
 
+    <!--
+        Used only in the background to crawl a media item's linked source page for its full
+        original file (see MainActivity.crawlSourcePage). "invisible" rather than "gone" so it
+        keeps a real, non-zero viewport - a zero-size WebView can render lazy-loaded pages
+        differently or not at all; invisible views are excluded from touch dispatch by
+        default, so it can never intercept taps meant for the visible WebView above it.
+    -->
+    <WebView
+        android:id="@+id/crawlerWebView"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:visibility="invisible"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/progressBar" />
+
     <FrameLayout
         android:id="@+id/fullscreenContainer"
         android:layout_width="match_parent"

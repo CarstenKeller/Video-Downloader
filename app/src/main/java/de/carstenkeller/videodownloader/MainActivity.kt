@@ -25,7 +25,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -44,6 +47,10 @@ class MainActivity : AppCompatActivity() {
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
     private var lastHost: String? = null
 
+    // Only one hidden crawler WebView exists, so only one source page can be crawled at a
+    // time - this serializes crawlSourcePage() calls instead of letting them race on it.
+    private val crawlerMutex = Mutex()
+
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,6 +58,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         setupWebView()
+        setupCrawlerWebView()
         setupControls()
 
         onBackPressedDispatcher.addCallback(this) {
@@ -130,6 +138,16 @@ class MainActivity : AppCompatActivity() {
         binding.webView.loadUrl(DEFAULT_URL)
     }
 
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun setupCrawlerWebView() {
+        binding.crawlerWebView.settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            loadWithOverviewMode = true
+            useWideViewPort = true
+        }
+    }
+
     private fun setupControls() {
         binding.btnBack.setOnClickListener { if (binding.webView.canGoBack()) binding.webView.goBack() }
         binding.btnForward.setOnClickListener { if (binding.webView.canGoForward()) binding.webView.goForward() }
@@ -168,11 +186,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Runs a JS expression and suspends until the result comes back, instead of the raw
-     * callback-based evaluateJavascript API.
+     * Runs a JS expression on the given WebView and suspends until the result comes back,
+     * instead of the raw callback-based evaluateJavascript API.
      */
-    private suspend fun evalJs(script: String): String? = suspendCancellableCoroutine { cont ->
-        binding.webView.evaluateJavascript(script) { result ->
+    private suspend fun evalJs(webView: WebView, script: String): String? = suspendCancellableCoroutine { cont ->
+        webView.evaluateJavascript(script) { result ->
             if (cont.isActive) cont.resume(result)
         }
     }
@@ -183,7 +201,7 @@ class MainActivity : AppCompatActivity() {
      * "nothing found" message after a whole scroll-and-scan pass.
      */
     private suspend fun scanAndMergeOnce(): Int {
-        val rawResult = evalJs(MediaScanner.SCAN_JS)
+        val rawResult = evalJs(binding.webView, MediaScanner.SCAN_JS)
         val scanned = MediaScanner.parseResult(rawResult)
         val existing = viewModel.items.value
         val existingUrls = existing.map { it.url }.toSet()
@@ -210,7 +228,83 @@ class MainActivity : AppCompatActivity() {
         }
         fetchSizes(newItems)
         fetchThumbnails(newItems)
+        upgradeFromSourceLinks(newScanned.zip(newItems))
         return newItems.size
+    }
+
+    /**
+     * Best-effort background upgrade: for any newly found item whose page linked it to another
+     * page (e.g. a search-result grid linking a reduced preview through to its original source
+     * page - see MediaScanner.SCAN_JS's sourceLink), crawl that source page in a hidden WebView
+     * and, if it contains a matching-kind media file, replace the preview with it. Runs after
+     * the item is already shown with its own (possibly reduced) data, so this only improves the
+     * entry in place if and when a crawl succeeds - it never blocks or delays the visible scan.
+     *
+     * This is inherently best-effort: it depends entirely on the page actually exposing such a
+     * link near the media (true for many search-result/gallery grids, not guaranteed anywhere),
+     * and on a single hidden WebView successfully loading and rendering that other page.
+     */
+    private fun upgradeFromSourceLinks(pairs: List<Pair<ScannedMedia, MediaItem>>) {
+        pairs.forEach { (media, item) ->
+            val sourceLink = media.sourceLink ?: return@forEach
+            lifecycleScope.launch {
+                val candidates = crawlSourcePage(sourceLink)
+                val match = pickBestMatch(media, candidates) ?: return@launch
+                if (match.url == item.url) return@launch
+
+                val newFileName = MediaScanner.deriveFileName(match.url, match.kind, 1)
+                viewModel.updateItem(item.id) {
+                    it.copy(
+                        url = match.url,
+                        kind = match.kind,
+                        looksLikeGif = match.looksLikeGif,
+                        posterUrl = match.posterUrl,
+                        sourcePageUrl = sourceLink,
+                        fileName = newFileName,
+                        sizeBytes = null,
+                        thumbnail = null,
+                        thumbnailError = null
+                    )
+                }
+                val updated = viewModel.items.value.find { it.id == item.id } ?: return@launch
+                fetchSizes(listOf(updated))
+                fetchThumbnails(listOf(updated))
+            }
+        }
+    }
+
+    /** Prefers a candidate of the exact same kind/looksLikeGif; falls back to matching kind. */
+    private fun pickBestMatch(target: ScannedMedia, candidates: List<ScannedMedia>): ScannedMedia? {
+        return candidates.firstOrNull { it.kind == target.kind && it.looksLikeGif == target.looksLikeGif }
+            ?: candidates.firstOrNull { it.kind == target.kind }
+    }
+
+    /**
+     * Loads [url] in the hidden crawler WebView and runs the same scan used for the visible
+     * page against it. Serialized via [crawlerMutex] since only one hidden WebView exists.
+     * Gives up (returning an empty list) if the page doesn't finish loading within 10s - some
+     * pages never fire a clean load-complete event, and this is a background nice-to-have, not
+     * something worth hanging on indefinitely.
+     */
+    private suspend fun crawlSourcePage(url: String): List<ScannedMedia> = crawlerMutex.withLock {
+        val loaded = withTimeoutOrNull(10_000) {
+            suspendCancellableCoroutine<Unit> { cont ->
+                binding.crawlerWebView.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, finishedUrl: String?) {
+                        if (cont.isActive) cont.resume(Unit)
+                    }
+                }
+                binding.crawlerWebView.loadUrl(url)
+            }
+        }
+        if (loaded == null) return@withLock emptyList()
+
+        // A short settle delay for any immediate script-driven content, mirroring the visible
+        // scan's approach without its scroll steps - the hidden WebView isn't scrolled, so this
+        // only catches content that loads on its own, not content gated behind scroll position.
+        delay(500L)
+        val raw = evalJs(binding.crawlerWebView, MediaScanner.SCAN_JS)
+        MediaScanner.parseResult(raw)
     }
 
     /**
@@ -244,20 +338,21 @@ class MainActivity : AppCompatActivity() {
             var lastHeight = -1.0
             var steps = 0
             while (steps < MAX_AUTO_SCROLL_STEPS) {
-                evalJs("window.scrollBy(0, Math.round(window.innerHeight * 0.85));")
+                evalJs(binding.webView, "window.scrollBy(0, Math.round(window.innerHeight * 0.85));")
                 delay(AUTO_SCROLL_STEP_DELAY_MS)
                 totalNew += scanAndMergeOnce()
 
                 val height = evalJs(
+                    binding.webView,
                     "Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);"
                 )?.toDoubleOrNull() ?: break
-                val scrollY = evalJs("window.scrollY;")?.toDoubleOrNull() ?: 0.0
+                val scrollY = evalJs(binding.webView, "window.scrollY;")?.toDoubleOrNull() ?: 0.0
                 steps++
                 val reachedBottom = scrollY + binding.webView.height >= height - 50
                 if (reachedBottom && height <= lastHeight + 5) break
                 lastHeight = height
             }
-            evalJs("window.scrollTo(0, 0);")
+            evalJs(binding.webView, "window.scrollTo(0, 0);")
 
             binding.btnScan.isEnabled = true
             if (totalNew == 0) {
