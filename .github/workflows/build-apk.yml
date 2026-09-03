@@ -1,0 +1,53 @@
+name: Build APK
+
+on:
+  push:
+    branches:
+      - claude/android-video-downloader-yw44fy
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Upload APK as build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-downloader-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Publish to "latest debug build" release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-debug-build
+          name: Latest debug build
+          body: |
+            Automatisch gebauter Debug-Build von Commit ${{ github.sha }}.
+
+            APK herunterladen und auf dem Handy installieren
+            (einmalig "Installation aus unbekannten Quellen" für den
+            Browser/die App, mit der die Datei geöffnet wird, erlauben).
+          prerelease: true
+          files: app/build/outputs/apk/debug/app-debug.apk
