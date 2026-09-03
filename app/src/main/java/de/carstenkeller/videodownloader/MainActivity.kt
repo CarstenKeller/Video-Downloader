@@ -28,6 +28,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.io.File
 import java.nio.ByteBuffer
 import kotlin.coroutines.resume
 
@@ -366,30 +367,64 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Downloads the video to a temp file (capped at [MAX_THUMBNAIL_DOWNLOAD_BYTES]) and
+     * extracts the frame from that local file, instead of pointing MediaMetadataRetriever at
+     * the network URL directly. Reported symptom that led here: the downloaded file itself
+     * plays back fine (real frames, not blank) once saved, but retriever.setDataSource(url,
+     * headers) kept "succeeding" with a blank bitmap and no exception - i.e. real video data,
+     * but MediaMetadataRetriever's own HTTP/seek handling wasn't reading it correctly over the
+     * network for these clips. Extracting from a local file sidesteps that entirely, at the
+     * cost of downloading the bytes twice for anything the user goes on to also download - an
+     * acceptable trade for a working thumbnail on a typically-small preview clip.
+     */
     private fun extractVideoFrame(url: String, referer: String?): Bitmap {
-        val retriever = MediaMetadataRetriever()
+        val tempFile = File.createTempFile("thumb_", ".tmp", cacheDir)
         try {
-            val headers = mutableMapOf("User-Agent" to NetworkHeaders.USER_AGENT)
-            if (referer != null) headers["Referer"] = referer
-            NetworkHeaders.cookiesFor(url)?.let { headers["Cookie"] = it }
-            retriever.setDataSource(url, headers)
+            val builder = withCommonHeaders(Request.Builder().url(url), url)
+            if (referer != null) builder.header("Referer", referer)
+            httpClient.newCall(builder.build()).execute().use { response ->
+                if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code}")
+                val body = response.body ?: throw java.io.IOException("Leere Antwort")
+                val written = tempFile.outputStream().use { out ->
+                    copyLimited(body.byteStream(), out, MAX_THUMBNAIL_DOWNLOAD_BYTES)
+                }
+                if (written <= 0L) throw java.io.IOException("Leere Antwort")
+            }
 
-            // A fixed 1-second mark landed on a blank/solid intro frame for some very short
-            // (~1-2s) looping clips - reported as a "successful" thumbnail that just looked
-            // empty, since a still-blank decode isn't an exception. Picking a point roughly a
-            // third into the clip's own duration, and OPTION_CLOSEST (exact decode) instead of
-            // OPTION_CLOSEST_SYNC (nearest keyframe only), is more likely to land on an actual
-            // content frame instead of the same first keyframe most short clips would give.
-            val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
-                ?.toLongOrNull()
-            val targetUs = if (durationMs != null && durationMs > 0) (durationMs * 1000L) / 3 else 300_000L
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(tempFile.absolutePath)
+                // Picking a point roughly a third into the clip's own duration, with
+                // OPTION_CLOSEST (exact decode, not just the nearest keyframe), is more likely
+                // to land on an actual content frame than a fixed early timestamp would for a
+                // short looping clip.
+                val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                    ?.toLongOrNull()
+                val targetUs = if (durationMs != null && durationMs > 0) (durationMs * 1000L) / 3 else 300_000L
 
-            return retriever.getFrameAtTime(targetUs, MediaMetadataRetriever.OPTION_CLOSEST)
-                ?: retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST)
-                ?: throw IllegalStateException("Kein Frame extrahierbar")
+                return retriever.getFrameAtTime(targetUs, MediaMetadataRetriever.OPTION_CLOSEST)
+                    ?: retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST)
+                    ?: throw IllegalStateException("Kein Frame extrahierbar")
+            } finally {
+                retriever.release()
+            }
         } finally {
-            retriever.release()
+            tempFile.delete()
         }
+    }
+
+    private fun copyLimited(input: java.io.InputStream, output: java.io.OutputStream, maxBytes: Long): Long {
+        val buffer = ByteArray(8192)
+        var total = 0L
+        while (total < maxBytes) {
+            val toRead = minOf(buffer.size.toLong(), maxBytes - total).toInt()
+            val read = input.read(buffer, 0, toRead)
+            if (read == -1) break
+            output.write(buffer, 0, read)
+            total += read
+        }
+        return total
     }
 
     companion object {
@@ -400,5 +435,10 @@ class MainActivity : AppCompatActivity() {
         // that keeps this from scrolling forever on a genuinely infinite-scroll page.
         private const val MAX_AUTO_SCROLL_STEPS = 20
         private const val AUTO_SCROLL_STEP_DELAY_MS = 400L
+
+        // Thumbnail extraction downloads to a temp file first (see extractVideoFrame) rather
+        // than streaming from the network URL directly; capped so a large real video doesn't
+        // fully download just to render a list thumbnail.
+        private const val MAX_THUMBNAIL_DOWNLOAD_BYTES = 8L * 1024 * 1024
     }
 }
