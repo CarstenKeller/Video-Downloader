@@ -195,18 +195,22 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** [candidateLinks]: see MediaScanner.parseCandidateLinks - link-only fallback candidates. */
+    private data class ScanPassResult(val newCount: Int, val candidateLinks: List<String>)
+
     /**
      * Scans the media currently in the DOM and merges genuinely new finds into the list.
      * Returns how many new items were found, so callers can decide whether to show a
      * "nothing found" message after a whole scroll-and-scan pass.
      */
-    private suspend fun scanAndMergeOnce(): Int {
+    private suspend fun scanAndMergeOnce(): ScanPassResult {
         val rawResult = evalJs(binding.webView, MediaScanner.SCAN_JS)
         val scanned = MediaScanner.parseResult(rawResult)
+        val candidateLinks = MediaScanner.parseCandidateLinks(rawResult)
         val existing = viewModel.items.value
         val existingUrls = existing.map { it.url }.toSet()
         val newScanned = scanned.filter { it.url !in existingUrls }
-        if (newScanned.isEmpty()) return 0
+        if (newScanned.isEmpty()) return ScanPassResult(0, candidateLinks)
 
         val fileNames = MediaScanner.buildFileNames(newScanned, existing.map { it.fileName }.toSet())
         val currentPageUrl = binding.webView.url
@@ -229,7 +233,7 @@ class MainActivity : AppCompatActivity() {
         fetchSizes(newItems)
         fetchThumbnails(newItems)
         upgradeFromSourceLinks(newScanned.zip(newItems))
-        return newItems.size
+        return ScanPassResult(newItems.size, candidateLinks)
     }
 
     /**
@@ -292,13 +296,16 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * Loads [url] in the hidden crawler WebView and runs the same scan used for the visible
-     * page against it. Serialized via [crawlerMutex] since only one hidden WebView exists.
-     * Gives up (returning an empty list) if the page doesn't finish loading within 10s - some
-     * pages never fire a clean load-complete event, and this is a background nice-to-have, not
-     * something worth hanging on indefinitely.
+     * page against it, retrying after a few scroll steps if nothing turns up right away (some
+     * source pages lazy-load their media only once scrolled into view, same as the visible
+     * page). Serialized via [crawlerMutex] since only one hidden WebView exists. Gives up
+     * (returning an empty list) if the page doesn't finish loading within
+     * [CRAWL_LOAD_TIMEOUT_MS] - some pages never fire a clean load-complete event, and per the
+     * user's explicit call, this is allowed to take a while for a good result, but not hang
+     * forever on one that never resolves.
      */
     private suspend fun crawlSourcePage(url: String): List<ScannedMedia> = crawlerMutex.withLock {
-        val loaded = withTimeoutOrNull(10_000) {
+        val loaded = withTimeoutOrNull(CRAWL_LOAD_TIMEOUT_MS) {
             suspendCancellableCoroutine<Unit> { cont ->
                 binding.crawlerWebView.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView?, finishedUrl: String?) {
@@ -310,12 +317,57 @@ class MainActivity : AppCompatActivity() {
         }
         if (loaded == null) return@withLock emptyList()
 
-        // A short settle delay for any immediate script-driven content, mirroring the visible
-        // scan's approach without its scroll steps - the hidden WebView isn't scrolled, so this
-        // only catches content that loads on its own, not content gated behind scroll position.
-        delay(500L)
-        val raw = evalJs(binding.crawlerWebView, MediaScanner.SCAN_JS)
-        MediaScanner.parseResult(raw)
+        delay(CRAWL_SETTLE_DELAY_MS)
+        var found = MediaScanner.parseResult(evalJs(binding.crawlerWebView, MediaScanner.SCAN_JS))
+        var steps = 0
+        while (found.isEmpty() && steps < CRAWL_SCROLL_STEPS) {
+            evalJs(binding.crawlerWebView, "window.scrollBy(0, Math.round(window.innerHeight * 0.85));")
+            delay(AUTO_SCROLL_STEP_DELAY_MS)
+            found = MediaScanner.parseResult(evalJs(binding.crawlerWebView, MediaScanner.SCAN_JS))
+            steps++
+        }
+        found
+    }
+
+    /**
+     * Fallback for when a scan finds no media at all through normal element-based detection:
+     * crawls each duration-badge link candidate (see MediaScanner.parseCandidateLinks - result
+     * cards, e.g. a video search tab, that show only a thumbnail + duration with no media
+     * element in the DOM until opened) and adds whatever real media those pages contain. Only
+     * runs as a last resort, since it means loading several whole pages one by one through the
+     * single hidden crawler WebView - slow, but only when the fast path found nothing, and the
+     * user explicitly said a slower, more thorough attempt is worth it for video search results.
+     */
+    private suspend fun crawlCandidateLinksForMedia(candidateLinks: List<String>): Int {
+        var totalNew = 0
+        for (link in candidateLinks.take(MAX_CANDIDATE_LINK_CRAWLS)) {
+            val found = crawlSourcePage(link)
+            val existing = viewModel.items.value
+            val existingUrls = existing.map { it.url }.toSet()
+            val newOnes = found.filter { it.url !in existingUrls }
+            if (newOnes.isEmpty()) continue
+
+            val fileNames = MediaScanner.buildFileNames(newOnes, existing.map { it.fileName }.toSet())
+            val newItems = newOnes.mapIndexed { index, media ->
+                MediaItem(
+                    id = media.url,
+                    url = media.url,
+                    kind = media.kind,
+                    fileName = fileNames[index],
+                    posterUrl = media.posterUrl,
+                    sourcePageUrl = link,
+                    looksLikeGif = media.looksLikeGif
+                )
+            }
+            viewModel.setItems(existing + newItems)
+            if (supportFragmentManager.findFragmentByTag(MEDIA_LIST_TAG) == null) {
+                MediaListBottomSheet().show(supportFragmentManager, MEDIA_LIST_TAG)
+            }
+            fetchSizes(newItems)
+            fetchThumbnails(newItems)
+            totalNew += newItems.size
+        }
+        return totalNew
     }
 
     /**
@@ -344,14 +396,18 @@ class MainActivity : AppCompatActivity() {
         binding.btnScan.isEnabled = false
         viewModel.setItems(emptyList())
         lifecycleScope.launch {
-            var totalNew = scanAndMergeOnce()
+            val firstPass = scanAndMergeOnce()
+            var totalNew = firstPass.newCount
+            val candidateLinks = LinkedHashSet(firstPass.candidateLinks)
 
             var lastHeight = -1.0
             var steps = 0
             while (steps < MAX_AUTO_SCROLL_STEPS) {
                 evalJs(binding.webView, "window.scrollBy(0, Math.round(window.innerHeight * 0.85));")
                 delay(AUTO_SCROLL_STEP_DELAY_MS)
-                totalNew += scanAndMergeOnce()
+                val pass = scanAndMergeOnce()
+                totalNew += pass.newCount
+                candidateLinks.addAll(pass.candidateLinks)
 
                 val height = evalJs(
                     binding.webView,
@@ -364,6 +420,14 @@ class MainActivity : AppCompatActivity() {
                 lastHeight = height
             }
             evalJs(binding.webView, "window.scrollTo(0, 0);")
+
+            // Nothing found the fast way (no <video>/<img src=*.gif> element in the DOM at
+            // all) - fall back to crawling result cards that only show a thumbnail + duration
+            // badge (e.g. a video search tab), one page at a time. Only reached when the
+            // normal scan came up empty, so the extra time this takes only shows up then.
+            if (totalNew == 0 && candidateLinks.isNotEmpty()) {
+                totalNew += crawlCandidateLinksForMedia(candidateLinks.toList())
+            }
 
             binding.btnScan.isEnabled = true
             if (totalNew == 0) {
@@ -546,5 +610,13 @@ class MainActivity : AppCompatActivity() {
         // than streaming from the network URL directly; capped so a large real video doesn't
         // fully download just to render a list thumbnail.
         private const val MAX_THUMBNAIL_DOWNLOAD_BYTES = 8L * 1024 * 1024
+
+        // Background source-page crawling (crawlSourcePage/crawlCandidateLinksForMedia): more
+        // generous than the visible scan's own timing since it runs after the item is already
+        // shown, and per explicit user request is allowed to take longer for a better result.
+        private const val CRAWL_LOAD_TIMEOUT_MS = 15_000L
+        private const val CRAWL_SETTLE_DELAY_MS = 1000L
+        private const val CRAWL_SCROLL_STEPS = 3
+        private const val MAX_CANDIDATE_LINK_CRAWLS = 6
     }
 }

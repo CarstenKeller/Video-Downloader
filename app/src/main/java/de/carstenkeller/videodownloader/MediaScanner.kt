@@ -1,7 +1,7 @@
 package de.carstenkeller.videodownloader
 
 import android.net.Uri
-import org.json.JSONArray
+import org.json.JSONObject
 import org.json.JSONTokener
 
 data class ScannedMedia(
@@ -58,6 +58,27 @@ object MediaScanner {
               return absolutize(href, doc);
             } catch (e) { return null; }
           }
+          // Result-grid cards (e.g. a video search tab) that show only a static thumbnail
+          // image with a duration badge - no <video>/<source> element exists in the DOM at
+          // all until the card is opened. Not real media finds, just link candidates worth
+          // crawling as a fallback when nothing else was found directly on this page.
+          var durationRe = /\b\d{1,2}:\d{2}(:\d{2})?\b/;
+          function findDurationLinkCandidates(doc) {
+            var out = [];
+            try {
+              doc.querySelectorAll('a[href]').forEach(function(a) {
+                try {
+                  if (!a.querySelector('img')) return;
+                  if (!durationRe.test(a.textContent || '')) return;
+                  var href = a.getAttribute('href');
+                  if (!href || href.indexOf('#') === 0 || href.indexOf('javascript:') === 0) return;
+                  var abs = absolutize(href, doc);
+                  if (abs) out.push(abs);
+                } catch (e) {}
+              });
+            } catch (e) {}
+            return out;
+          }
           var videoExt = /\.(mp4|webm|mov|m4v|mkv|3gp|avi)(\?|#|${'$'})/i;
           var gifExt = /\.gif(\?|#|${'$'})/i;
           var lazyAttrs = ['src', 'data-src', 'data-original', 'data-lazy-src', 'data-video-src', 'data-url'];
@@ -105,23 +126,26 @@ object MediaScanner {
             }
           }
           scanDocument(document);
-          return JSON.stringify(urls);
+          return JSON.stringify({ media: urls, candidateLinks: findDurationLinkCandidates(document) });
         })();
     """
 
-    fun parseResult(rawEvaluateResult: String?): List<ScannedMedia> {
-        if (rawEvaluateResult == null || rawEvaluateResult == "null") return emptyList()
+    private fun parseRootObject(rawEvaluateResult: String?): JSONObject? {
+        if (rawEvaluateResult == null || rawEvaluateResult == "null") return null
         val jsonString = try {
             JSONTokener(rawEvaluateResult).nextValue() as? String
         } catch (e: Exception) {
             null
-        } ?: return emptyList()
-
-        val array = try {
-            JSONArray(jsonString)
+        } ?: return null
+        return try {
+            JSONObject(jsonString)
         } catch (e: Exception) {
-            return emptyList()
+            null
         }
+    }
+
+    fun parseResult(rawEvaluateResult: String?): List<ScannedMedia> {
+        val array = parseRootObject(rawEvaluateResult)?.optJSONArray("media") ?: return emptyList()
 
         val result = mutableListOf<ScannedMedia>()
         for (i in 0 until array.length()) {
@@ -134,6 +158,21 @@ object MediaScanner {
             result.add(ScannedMedia(url, kind, poster, looksLikeGif, sourceLink))
         }
         return result
+    }
+
+    /**
+     * Link candidates from result-grid cards that showed only a thumbnail + duration badge
+     * with no actual media element in the DOM (e.g. a video search tab) - see
+     * findDurationLinkCandidates in SCAN_JS. Used as a fallback: crawl these pages directly
+     * when a scan finds no media at all through the normal element-based detection.
+     */
+    fun parseCandidateLinks(rawEvaluateResult: String?): List<String> {
+        val array = parseRootObject(rawEvaluateResult)?.optJSONArray("candidateLinks") ?: return emptyList()
+        val result = mutableListOf<String>()
+        for (i in 0 until array.length()) {
+            array.optString(i).takeIf { it.isNotBlank() }?.let { result.add(it) }
+        }
+        return result.distinct()
     }
 
     /**
