@@ -12,6 +12,7 @@ data class MediaItem(
     val kind: MediaKind,
     val fileName: String,
     val posterUrl: String? = null,
+    val sourcePageUrl: String? = null,
     val sizeBytes: Long? = null,
     val selected: Boolean = true,
     val status: DownloadStatus = DownloadStatus.IDLE,

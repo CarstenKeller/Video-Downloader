@@ -168,9 +168,7 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * Runs a JS expression and suspends until the result comes back, instead of the raw
-     * callback-based evaluateJavascript API - lets scanCurrentPage() read as ordinary
-     * sequential code even though it now does several JS round-trips (scrolling, then
-     * scanning) instead of just one.
+     * callback-based evaluateJavascript API.
      */
     private suspend fun evalJs(script: String): String? = suspendCancellableCoroutine { cont ->
         binding.webView.evaluateJavascript(script) { result ->
@@ -179,84 +177,86 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Scrolls the page from top to bottom in steps, pausing between each so that
-     * scroll-triggered lazy-loading (IntersectionObserver-based images/videos, "load more"
-     * sections) has a chance to fire - the same mechanism a manual scroll relies on, just
-     * driven from code so the user doesn't have to do it by hand before every scan.
-     *
-     * This is a best-effort simulation, not a guarantee: a page that only creates video
-     * elements once truly visible on screen (rather than pre-loading nearby content) will
-     * still only reveal as much as this scroll budget covers, and an infinite-scroll feed
-     * has no real "bottom" - the step/time cap below is what keeps this from running
-     * forever on one.
+     * Scans the media currently in the DOM and merges genuinely new finds into the list.
+     * Returns how many new items were found, so callers can decide whether to show a
+     * "nothing found" message after a whole scroll-and-scan pass.
      */
-    private suspend fun autoScrollThroughPage() {
-        var lastHeight = -1.0
-        var steps = 0
-        while (steps < MAX_AUTO_SCROLL_STEPS) {
-            evalJs("window.scrollBy(0, Math.round(window.innerHeight * 0.85));")
-            delay(AUTO_SCROLL_STEP_DELAY_MS)
-            val height = evalJs(
-                "Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);"
-            )?.toDoubleOrNull() ?: break
-            val scrollY = evalJs("window.scrollY;")?.toDoubleOrNull() ?: 0.0
-            steps++
-            val reachedBottom = scrollY + binding.webView.height >= height - 50
-            if (reachedBottom && height <= lastHeight + 5) break
-            lastHeight = height
+    private suspend fun scanAndMergeOnce(): Int {
+        val rawResult = evalJs(MediaScanner.SCAN_JS)
+        val scanned = MediaScanner.parseResult(rawResult)
+        val existing = viewModel.items.value
+        val existingUrls = existing.map { it.url }.toSet()
+        val newScanned = scanned.filter { it.url !in existingUrls }
+        if (newScanned.isEmpty()) return 0
+
+        val fileNames = MediaScanner.buildFileNames(newScanned, existing.map { it.fileName }.toSet())
+        val currentPageUrl = binding.webView.url
+        val newItems = newScanned.mapIndexed { index, media ->
+            MediaItem(
+                id = media.url,
+                url = media.url,
+                kind = media.kind,
+                fileName = fileNames[index],
+                posterUrl = media.posterUrl,
+                sourcePageUrl = currentPageUrl
+            )
         }
-        evalJs("window.scrollTo(0, 0);")
-        delay(150)
+
+        viewModel.setItems(existing + newItems)
+        if (supportFragmentManager.findFragmentByTag(MEDIA_LIST_TAG) == null) {
+            MediaListBottomSheet().show(supportFragmentManager, MEDIA_LIST_TAG)
+        }
+        fetchSizes(newItems)
+        fetchThumbnails(newItems)
+        return newItems.size
     }
 
     /**
-     * Scans the current page and *merges* new finds into the existing list rather than
-     * replacing it, so scanning again (e.g. after the page itself loaded more content)
-     * grows the list instead of resetting it. Also recurses into same-origin iframes (see
+     * Scans the current page while driving it top-to-bottom in steps, scanning again after
+     * *each* step - not just once at the end. This matters: many media-heavy pages
+     * virtualize their DOM, removing off-screen <video>/<img> elements again once you
+     * scroll past them to save memory. Scanning only after returning to the top would miss
+     * anything that got unloaded again in the meantime; scanning right after each step
+     * catches it while it's still there. Also recurses into same-origin iframes (see
      * MediaScanner.SCAN_JS); cross-origin iframes cannot be inspected at all - the
      * browser's same-origin policy blocks that unconditionally, not just here.
+     *
+     * The scroll is a best-effort simulation of manual scrolling, not a guarantee: a page
+     * that only creates elements once truly on-screen still only reveals as much as this
+     * step/time budget covers, and a genuinely infinite-scroll feed has no real bottom -
+     * the step cap is what stops this from running forever on one.
      */
     private fun scanCurrentPage() {
-        // Immediate feedback on tap, independent of how long the scroll+scan takes - so it
-        // reads as "working" rather than as the button doing nothing.
+        // Immediate feedback on tap, independent of how long this takes - so it reads as
+        // "working" rather than as the button doing nothing.
         binding.btnScan.isEnabled = false
         lifecycleScope.launch {
-            autoScrollThroughPage()
-            val rawResult = evalJs(MediaScanner.SCAN_JS)
+            val foundBefore = viewModel.items.value.size
+            var totalNew = scanAndMergeOnce()
+
+            var lastHeight = -1.0
+            var steps = 0
+            while (steps < MAX_AUTO_SCROLL_STEPS) {
+                evalJs("window.scrollBy(0, Math.round(window.innerHeight * 0.85));")
+                delay(AUTO_SCROLL_STEP_DELAY_MS)
+                totalNew += scanAndMergeOnce()
+
+                val height = evalJs(
+                    "Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);"
+                )?.toDoubleOrNull() ?: break
+                val scrollY = evalJs("window.scrollY;")?.toDoubleOrNull() ?: 0.0
+                steps++
+                val reachedBottom = scrollY + binding.webView.height >= height - 50
+                if (reachedBottom && height <= lastHeight + 5) break
+                lastHeight = height
+            }
+            evalJs("window.scrollTo(0, 0);")
+
             binding.btnScan.isEnabled = true
-
-            val scanned = MediaScanner.parseResult(rawResult)
-            val existing = viewModel.items.value
-            val existingUrls = existing.map { it.url }.toSet()
-            val newScanned = scanned.filter { it.url !in existingUrls }
-
-            if (newScanned.isEmpty()) {
-                val messageRes = if (existing.isEmpty()) R.string.no_media_found else R.string.no_new_media_found
+            if (totalNew == 0) {
+                val messageRes = if (foundBefore == 0) R.string.no_media_found else R.string.no_new_media_found
                 Toast.makeText(this@MainActivity, messageRes, Toast.LENGTH_SHORT).show()
-                if (existing.isNotEmpty() && supportFragmentManager.findFragmentByTag(MEDIA_LIST_TAG) == null) {
-                    MediaListBottomSheet().show(supportFragmentManager, MEDIA_LIST_TAG)
-                }
-                return@launch
             }
-
-            val fileNames = MediaScanner.buildFileNames(newScanned, existing.map { it.fileName }.toSet())
-            val currentPageUrl = binding.webView.url
-            val newItems = newScanned.mapIndexed { index, media ->
-                MediaItem(
-                    id = media.url,
-                    url = media.url,
-                    kind = media.kind,
-                    fileName = fileNames[index],
-                    posterUrl = media.posterUrl
-                )
-            }
-
-            viewModel.setItems(existing + newItems)
-            if (supportFragmentManager.findFragmentByTag(MEDIA_LIST_TAG) == null) {
-                MediaListBottomSheet().show(supportFragmentManager, MEDIA_LIST_TAG)
-            }
-            fetchSizes(newItems)
-            fetchThumbnails(newItems, currentPageUrl)
         }
     }
 
@@ -275,12 +275,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun fetchContentLength(url: String): Long? {
         return try {
-            val headRequest = Request.Builder().url(url).header("User-Agent", USER_AGENT).head().build()
+            val headRequest = withCommonHeaders(Request.Builder().url(url), url).head().build()
             httpClient.newCall(headRequest).execute().use { response ->
                 response.header("Content-Length")?.toLongOrNull()?.let { return it }
             }
-            val rangeRequest = Request.Builder().url(url)
-                .header("User-Agent", USER_AGENT)
+            val rangeRequest = withCommonHeaders(Request.Builder().url(url), url)
                 .header("Range", "bytes=0-0")
                 .get()
                 .build()
@@ -301,14 +300,14 @@ class MainActivity : AppCompatActivity() {
      * remote file as it needs - not the whole thing, but still real network/data usage per
      * video, unlike the poster case.
      */
-    private fun fetchThumbnails(items: List<MediaItem>, pageUrl: String?) {
+    private fun fetchThumbnails(items: List<MediaItem>) {
         items.forEach { item ->
             lifecycleScope.launch(Dispatchers.IO) {
                 val bitmap = try {
                     when {
-                        item.kind == MediaKind.GIF -> loadBitmapFromUrl(item.url, pageUrl)
-                        item.posterUrl != null -> loadBitmapFromUrl(item.posterUrl, pageUrl)
-                        else -> extractVideoFrame(item.url, pageUrl)
+                        item.kind == MediaKind.GIF -> loadBitmapFromUrl(item.url, item.sourcePageUrl)
+                        item.posterUrl != null -> loadBitmapFromUrl(item.posterUrl, item.sourcePageUrl)
+                        else -> extractVideoFrame(item.url, item.sourcePageUrl)
                     }
                 } catch (e: Exception) {
                     null
@@ -322,8 +321,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Adds User-Agent and, if the WebView has any for this URL, the session's cookies. */
+    private fun withCommonHeaders(builder: Request.Builder, url: String): Request.Builder {
+        builder.header("User-Agent", NetworkHeaders.USER_AGENT)
+        NetworkHeaders.cookiesFor(url)?.let { builder.header("Cookie", it) }
+        return builder
+    }
+
     private fun loadBitmapFromUrl(url: String, referer: String?): Bitmap? {
-        val builder = Request.Builder().url(url).header("User-Agent", USER_AGENT)
+        val builder = withCommonHeaders(Request.Builder().url(url), url)
         if (referer != null) builder.header("Referer", referer)
         httpClient.newCall(builder.build()).execute().use { response ->
             if (!response.isSuccessful) return null
@@ -352,8 +358,9 @@ class MainActivity : AppCompatActivity() {
     private fun extractVideoFrame(url: String, referer: String?): Bitmap? {
         val retriever = MediaMetadataRetriever()
         return try {
-            val headers = mutableMapOf("User-Agent" to USER_AGENT)
+            val headers = mutableMapOf("User-Agent" to NetworkHeaders.USER_AGENT)
             if (referer != null) headers["Referer"] = referer
+            NetworkHeaders.cookiesFor(url)?.let { headers["Cookie"] = it }
             retriever.setDataSource(url, headers)
             retriever.getFrameAtTime(1_000_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                 ?: retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
@@ -372,12 +379,5 @@ class MainActivity : AppCompatActivity() {
         // that keeps this from scrolling forever on a genuinely infinite-scroll page.
         private const val MAX_AUTO_SCROLL_STEPS = 20
         private const val AUTO_SCROLL_STEP_DELAY_MS = 400L
-
-        // Some CDNs reject requests without a browser-like User-Agent (OkHttp's and
-        // MediaMetadataRetriever's defaults are easy to fingerprint and block). Used for
-        // size lookups, poster/GIF thumbnail fetches, and video frame extraction.
-        private const val USER_AGENT =
-            "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) " +
-                "Chrome/124.0.0.0 Mobile Safari/537.36"
     }
 }

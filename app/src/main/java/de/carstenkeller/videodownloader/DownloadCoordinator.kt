@@ -38,7 +38,10 @@ class DownloadCoordinator(
         onDone: (id: String, success: Boolean, error: String?) -> Unit
     ) {
         try {
-            val request = Request.Builder().url(item.url).build()
+            val requestBuilder = Request.Builder().url(item.url).header("User-Agent", NetworkHeaders.USER_AGENT)
+            item.sourcePageUrl?.let { requestBuilder.header("Referer", it) }
+            NetworkHeaders.cookiesFor(item.url)?.let { requestBuilder.header("Cookie", it) }
+            val request = requestBuilder.build()
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
                 val body = response.body ?: throw IOException("Leere Antwort")
