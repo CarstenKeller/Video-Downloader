@@ -32,11 +32,23 @@ jobs:
       - name: Build debug APK
         run: ./gradlew assembleDebug --no-daemon
 
+      - name: Rename APK with commit SHA
+        # The release tag/filename otherwise stay identical on every build, which is exactly
+        # the condition browsers and intermediate caches use to justify serving a stale,
+        # previously-downloaded copy instead of fetching the new one - confirmed happening
+        # (a user downloaded a several-builds-old APK from the "latest" link). Giving each
+        # build's asset a unique, SHA-suffixed filename changes the download URL every time,
+        # which forces a fresh fetch regardless of any cache.
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "SHORT_SHA=$SHORT_SHA" >> "$GITHUB_ENV"
+          cp app/build/outputs/apk/debug/app-debug.apk "app/build/outputs/apk/debug/app-debug-$SHORT_SHA.apk"
+
       - name: Upload APK as build artifact
         uses: actions/upload-artifact@v4
         with:
           name: video-downloader-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: app/build/outputs/apk/debug/app-debug-${{ env.SHORT_SHA }}.apk
 
       - name: Publish to "latest debug build" release
         uses: softprops/action-gh-release@v2
@@ -49,5 +61,9 @@ jobs:
             APK herunterladen und auf dem Handy installieren
             (einmalig "Installation aus unbekannten Quellen" für den
             Browser/die App, mit der die Datei geöffnet wird, erlauben).
+
+            Der Dateiname enthält den Commit-Hash, damit der Download-Link
+            sich bei jedem Build ändert und niemals eine alte, zwischengespeicherte
+            Version ausliefert.
           prerelease: true
-          files: app/build/outputs/apk/debug/app-debug.apk
+          files: app/build/outputs/apk/debug/app-debug-${{ env.SHORT_SHA }}.apk
