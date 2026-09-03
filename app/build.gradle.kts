@@ -15,6 +15,21 @@ android {
         versionName = "1.0"
     }
 
+    signingConfigs {
+        // Overrides AGP's default debug config, which otherwise auto-generates a new
+        // (different) key on every fresh machine - including every GitHub Actions run.
+        // Using a checked-in, fixed keystore keeps the signature stable across CI builds,
+        // so each new debug APK installs as an update instead of requiring an uninstall
+        // first. A debug keystore is not sensitive the way a release key is - this is a
+        // common, accepted practice.
+        getByName("debug") {
+            storeFile = file("../keystore/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
