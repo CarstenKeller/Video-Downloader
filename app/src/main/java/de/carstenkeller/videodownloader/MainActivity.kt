@@ -31,6 +31,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONObject
 import java.io.File
 import java.nio.ByteBuffer
 import kotlin.coroutines.resume
@@ -222,8 +223,7 @@ class MainActivity : AppCompatActivity() {
                 fileName = fileNames[index],
                 posterUrl = media.posterUrl,
                 sourcePageUrl = currentPageUrl,
-                looksLikeGif = media.looksLikeGif,
-                crawlStatus = if (media.sourceLink == null) "Quelle: kein Link auf der Seite gefunden" else null
+                looksLikeGif = media.looksLikeGif
             )
         }
 
@@ -233,33 +233,44 @@ class MainActivity : AppCompatActivity() {
         }
         fetchSizes(newItems)
         fetchThumbnails(newItems)
-        upgradeFromSourceLinks(newScanned.zip(newItems))
+        upgradeFromSourceLinks(newScanned.zip(newItems), currentPageUrl)
         return ScanPassResult(newItems.size, candidateLinks)
     }
 
     /**
-     * Best-effort background upgrade: for any newly found item whose page linked it to another
-     * page (e.g. a search-result grid linking a reduced preview through to its original source
-     * page - see MediaScanner.SCAN_JS's sourceLink), crawl that source page in a hidden WebView
-     * and, if it contains a matching-kind media file, replace the preview with it. Runs after
-     * the item is already shown with its own (possibly reduced) data, so this only improves the
-     * entry in place if and when a crawl succeeds - it never blocks or delays the visible scan.
+     * Best-effort background upgrade for each newly found item, trying two ways to reach its
+     * real, original file:
+     * 1. If the page links it to another page (sourceLink - e.g. a search-result/gallery grid
+     *    linking a reduced preview through to its source page), crawl that page directly.
+     * 2. Otherwise (confirmed by testing: Google Images does NOT wrap its GIF results in real
+     *    <a href> links at all, so there's nothing for (1) to find there), simulate a real
+     *    click on the matching element in a fresh, hidden load of the current page - Google's
+     *    grid opens its results via a JS click handler, not a link, so this is the only way
+     *    left to trigger whatever detail/lightbox view it opens and read that instead.
      *
-     * This is inherently best-effort: it depends entirely on the page actually exposing such a
-     * link near the media (true for many search-result/gallery grids, not guaranteed anywhere),
-     * and on a single hidden WebView successfully loading and rendering that other page.
+     * Both are best-effort and run after the item is already shown with its own (possibly
+     * reduced) data - this only improves the entry in place if a crawl succeeds, and never
+     * blocks or delays the visible scan itself.
      */
-    private fun upgradeFromSourceLinks(pairs: List<Pair<ScannedMedia, MediaItem>>) {
+    private fun upgradeFromSourceLinks(pairs: List<Pair<ScannedMedia, MediaItem>>, pageUrl: String?) {
         pairs.forEach { (media, item) ->
-            val sourceLink = media.sourceLink ?: return@forEach
             lifecycleScope.launch {
                 viewModel.updateItem(item.id) { it.copy(crawlStatus = "Quelle wird geprüft…") }
-                val candidates = crawlSourcePage(sourceLink)
+
+                val viaLink = media.sourceLink != null
+                val candidates = when {
+                    viaLink -> crawlSourcePage(media.sourceLink!!)
+                    pageUrl != null -> crawlWithClickSimulation(pageUrl, media.url)
+                    else -> emptyList()
+                }
+
+                val prefix = if (viaLink) "Quelle" else "Quelle (Klick-Simulation)"
                 val match = pickBestMatch(media, candidates)
                 val status = when {
-                    candidates.isEmpty() -> "Quelle: Crawl fand keine Medien (Timeout oder leere Seite)"
-                    match == null -> "Quelle: ${candidates.size} Medien gefunden, keins passte"
-                    match.url == item.url -> "Quelle: identisch mit Vorschau"
+                    !viaLink && pageUrl == null -> "$prefix: keine Seiten-URL verfügbar"
+                    candidates.isEmpty() -> "$prefix: kein Ergebnis (Timeout, leere Seite oder Element nicht gefunden)"
+                    match == null -> "$prefix: ${candidates.size} Medien gefunden, keins passte"
+                    match.url == item.url -> "$prefix: identisch mit Vorschau"
                     else -> null // success - cleared below, the upgrade itself is visible
                 }
                 if (match == null || match.url == item.url) {
@@ -274,7 +285,7 @@ class MainActivity : AppCompatActivity() {
                         kind = match.kind,
                         looksLikeGif = match.looksLikeGif,
                         posterUrl = match.posterUrl,
-                        sourcePageUrl = sourceLink,
+                        sourcePageUrl = media.sourceLink ?: pageUrl,
                         fileName = newFileName,
                         sizeBytes = null,
                         thumbnail = null,
@@ -307,17 +318,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Loads [url] in the hidden crawler WebView and runs the same scan used for the visible
-     * page against it, retrying after a few scroll steps if nothing turns up right away (some
-     * source pages lazy-load their media only once scrolled into view, same as the visible
-     * page). Serialized via [crawlerMutex] since only one hidden WebView exists. Gives up
-     * (returning an empty list) if the page doesn't finish loading within
-     * [CRAWL_LOAD_TIMEOUT_MS] - some pages never fire a clean load-complete event, and per the
-     * user's explicit call, this is allowed to take a while for a good result, but not hang
-     * forever on one that never resolves.
+     * Loads [url] in the hidden crawler WebView, waiting up to [CRAWL_LOAD_TIMEOUT_MS] for it
+     * to finish. Returns false (without throwing) if the page never fires a clean load-complete
+     * event - some pages don't, and this is a background nice-to-have, not worth hanging on
+     * indefinitely. Does NOT acquire [crawlerMutex] itself - callers must hold it, since it's
+     * shared by crawlSourcePage and crawlWithClickSimulation, which sometimes call each other.
      */
-    private suspend fun crawlSourcePage(url: String): List<ScannedMedia> = crawlerMutex.withLock {
-        val loaded = withTimeoutOrNull(CRAWL_LOAD_TIMEOUT_MS) {
+    private suspend fun loadInCrawler(url: String): Boolean {
+        return withTimeoutOrNull(CRAWL_LOAD_TIMEOUT_MS) {
             suspendCancellableCoroutine<Unit> { cont ->
                 binding.crawlerWebView.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView?, finishedUrl: String?) {
@@ -326,10 +334,16 @@ class MainActivity : AppCompatActivity() {
                 }
                 binding.crawlerWebView.loadUrl(url)
             }
-        }
-        if (loaded == null) return@withLock emptyList()
+        } != null
+    }
 
-        delay(CRAWL_SETTLE_DELAY_MS)
+    /**
+     * Scans whatever is currently loaded in the crawler WebView, retrying after a few scroll
+     * steps if nothing turns up right away (some pages lazy-load their media only once
+     * scrolled into view, same as the visible page). Does NOT acquire [crawlerMutex] - same
+     * reason as [loadInCrawler].
+     */
+    private suspend fun scanCrawlerWithRetry(): List<ScannedMedia> {
         var found = MediaScanner.parseResult(evalJs(binding.crawlerWebView, MediaScanner.SCAN_JS))
         var steps = 0
         while (found.isEmpty() && steps < CRAWL_SCROLL_STEPS) {
@@ -338,8 +352,95 @@ class MainActivity : AppCompatActivity() {
             found = MediaScanner.parseResult(evalJs(binding.crawlerWebView, MediaScanner.SCAN_JS))
             steps++
         }
-        found
+        return found
     }
+
+    /**
+     * Loads [url] in the hidden crawler WebView and scans it for media. Serialized via
+     * [crawlerMutex] since only one hidden WebView exists. Per the user's explicit call,
+     * crawling is allowed to take a while for a good result.
+     */
+    private suspend fun crawlSourcePage(url: String): List<ScannedMedia> = crawlerMutex.withLock {
+        if (!loadInCrawler(url)) return@withLock emptyList()
+        delay(CRAWL_SETTLE_DELAY_MS)
+        scanCrawlerWithRetry()
+    }
+
+    /** JS: finds the element whose src matches [targetMediaUrl] and dispatches a real click on
+     * it, returning "true"/"false" as a string (evaluateJavascript's result is always a JSON
+     * literal). Used when a page opens its content via a JS click handler instead of a real
+     * link - see [crawlWithClickSimulation]. */
+    private fun buildClickOnMediaJs(targetMediaUrl: String): String {
+        val target = JSONObject.quote(targetMediaUrl)
+        return """
+            (function() {
+              var target = $target;
+              function absolutize(url) {
+                if (!url) return null;
+                try { return new URL(url, document.baseURI).href; } catch (e) { return null; }
+              }
+              function candidateSrcs(el) {
+                var out = [];
+                if (el.currentSrc) out.push(el.currentSrc);
+                ['src', 'data-src', 'data-original', 'data-lazy-src', 'data-video-src', 'data-url'].forEach(function(attr) {
+                  var v = el.getAttribute(attr);
+                  if (v) out.push(v);
+                });
+                return out;
+              }
+              var found = null;
+              document.querySelectorAll('video, img').forEach(function(el) {
+                if (found) return;
+                if (candidateSrcs(el).some(function(s) { return absolutize(s) === target; })) found = el;
+              });
+              if (!found) return false;
+              try {
+                found.scrollIntoView({ block: 'center' });
+                found.click();
+                return true;
+              } catch (e) { return false; }
+            })();
+        """
+    }
+
+    /**
+     * Fallback for pages that open their content via a JS click handler instead of a real link
+     * - confirmed by testing that Google Images is exactly this case (0 of 12 GIF results had
+     * any <a href> at all, so crawlSourcePage's link-following has nothing to follow there).
+     * Loads [pageUrl] fresh in the hidden WebView, simulates a real click on the element whose
+     * src matches [targetMediaUrl] (see buildClickOnMediaJs), waits for whatever opens, then
+     * scans again for anything new. If what's revealed itself carries a source link (e.g. a
+     * "visit site" link in an opened detail view), follows that one extra hop too.
+     *
+     * This is speculative and Google's exact behavior here could not be verified without a
+     * live browser to inspect - it depends on the element actually being click-driven, on the
+     * resulting UI rendering within the hidden WebView the same way it would visibly, and on
+     * the reveal happening within [CLICK_REVEAL_DELAY_MS]/the scroll-retry budget.
+     */
+    private suspend fun crawlWithClickSimulation(pageUrl: String, targetMediaUrl: String): List<ScannedMedia> =
+        crawlerMutex.withLock {
+            if (!loadInCrawler(pageUrl)) return@withLock emptyList()
+            delay(CRAWL_SETTLE_DELAY_MS)
+
+            val clicked = evalJs(binding.crawlerWebView, buildClickOnMediaJs(targetMediaUrl))
+            if (clicked != "true") return@withLock emptyList()
+            delay(CLICK_REVEAL_DELAY_MS)
+
+            var revealed = MediaScanner.parseResult(evalJs(binding.crawlerWebView, MediaScanner.SCAN_JS))
+                .filter { it.url != targetMediaUrl }
+            if (revealed.isEmpty()) {
+                revealed = scanCrawlerWithRetry().filter { it.url != targetMediaUrl }
+            }
+            if (revealed.isEmpty()) return@withLock emptyList()
+
+            val deeperLink = revealed.firstOrNull { it.sourceLink != null }?.sourceLink
+            if (deeperLink != null && loadInCrawler(deeperLink)) {
+                delay(CRAWL_SETTLE_DELAY_MS)
+                val deeper = scanCrawlerWithRetry()
+                if (deeper.isNotEmpty()) return@withLock deeper
+            }
+            revealed
+        }
 
     /**
      * Fallback for when a scan finds no media at all through normal element-based detection:
@@ -642,6 +743,10 @@ class MainActivity : AppCompatActivity() {
         private const val CRAWL_LOAD_TIMEOUT_MS = 15_000L
         private const val CRAWL_SETTLE_DELAY_MS = 1000L
         private const val CRAWL_SCROLL_STEPS = 3
+
+        // How long to wait after simulating a click for whatever detail/lightbox view it opens
+        // to render (see crawlWithClickSimulation).
+        private const val CLICK_REVEAL_DELAY_MS = 1200L
         private const val MAX_CANDIDATE_LINK_CRAWLS = 6
     }
 }
