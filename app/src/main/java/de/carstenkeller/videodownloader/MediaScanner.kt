@@ -4,13 +4,15 @@ import android.net.Uri
 import org.json.JSONArray
 import org.json.JSONTokener
 
-data class ScannedMedia(val url: String, val kind: MediaKind)
+data class ScannedMedia(val url: String, val kind: MediaKind, val posterUrl: String? = null)
 
 /**
  * Finds <video>/<source> elements, .gif <img> tags and direct links to video/gif files
- * in the currently loaded page. Blob: and data: URIs are intentionally skipped since
- * they cannot be re-downloaded with a plain HTTP request (e.g. MSE-based streaming
- * players such as YouTube commonly only expose a blob: URL).
+ * in the currently loaded page - including same-origin <iframe> content, recursively.
+ * Blob: and data: URIs are intentionally skipped since they cannot be re-downloaded with
+ * a plain HTTP request (e.g. MSE-based streaming players such as YouTube commonly only
+ * expose a blob: URL). Cross-origin iframes cannot be inspected either - the browser's
+ * same-origin policy blocks script access to their content, with no workaround from JS.
  */
 object MediaScanner {
 
@@ -18,33 +20,52 @@ object MediaScanner {
         (function() {
           var urls = [];
           var seen = {};
-          function add(src, kind) {
-            if (!src) return;
-            var abs;
-            try { abs = new URL(src, document.baseURI).href; } catch (e) { return; }
+          function absolutize(url, doc) {
+            if (!url) return null;
+            try { return new URL(url, doc.baseURI).href; } catch (e) { return null; }
+          }
+          function add(src, kind, poster, doc) {
+            var abs = absolutize(src, doc);
+            if (!abs) return;
             if (abs.indexOf('blob:') === 0 || abs.indexOf('data:') === 0) return;
             if (seen[abs]) return;
             seen[abs] = true;
-            urls.push({url: abs, kind: kind});
+            urls.push({ url: abs, kind: kind, poster: absolutize(poster, doc) });
           }
           var videoExt = /\.(mp4|webm|mov|m4v|mkv|3gp|avi)(\?|#|${'$'})/i;
           var gifExt = /\.gif(\?|#|${'$'})/i;
-          document.querySelectorAll('video').forEach(function(v) {
-            add(v.currentSrc, 'video');
-            add(v.getAttribute('src'), 'video');
-            v.querySelectorAll('source').forEach(function(s) {
-              add(s.getAttribute('src'), 'video');
-            });
-          });
-          document.querySelectorAll('img').forEach(function(img) {
-            var s = img.currentSrc || img.getAttribute('src') || '';
-            if (gifExt.test(s)) add(s, 'gif');
-          });
-          document.querySelectorAll('a[href]').forEach(function(a) {
-            var href = a.getAttribute('href') || '';
-            if (videoExt.test(href)) add(href, 'video');
-            else if (gifExt.test(href)) add(href, 'gif');
-          });
+          function scanDocument(doc) {
+            try {
+              doc.querySelectorAll('video').forEach(function(v) {
+                var poster = v.getAttribute('poster');
+                add(v.currentSrc, 'video', poster, doc);
+                add(v.getAttribute('src'), 'video', poster, doc);
+                v.querySelectorAll('source').forEach(function(s) {
+                  add(s.getAttribute('src'), 'video', poster, doc);
+                });
+              });
+              doc.querySelectorAll('img').forEach(function(img) {
+                var s = img.currentSrc || img.getAttribute('src') || '';
+                if (gifExt.test(s)) add(s, 'gif', null, doc);
+              });
+              doc.querySelectorAll('a[href]').forEach(function(a) {
+                var href = a.getAttribute('href') || '';
+                if (videoExt.test(href)) add(href, 'video', null, doc);
+                else if (gifExt.test(href)) add(href, 'gif', null, doc);
+              });
+              doc.querySelectorAll('iframe').forEach(function(frame) {
+                try {
+                  var innerDoc = frame.contentDocument;
+                  if (innerDoc) scanDocument(innerDoc);
+                } catch (e) {
+                  // Cross-origin iframe: blocked by the browser's same-origin policy.
+                }
+              });
+            } catch (e) {
+              // Defensive: one broken frame should not abort the whole scan.
+            }
+          }
+          scanDocument(document);
           return JSON.stringify(urls);
         })();
     """
@@ -68,14 +89,20 @@ object MediaScanner {
             val obj = array.optJSONObject(i) ?: continue
             val url = obj.optString("url").takeIf { it.isNotBlank() } ?: continue
             val kind = if (obj.optString("kind") == "gif") MediaKind.GIF else MediaKind.VIDEO
-            result.add(ScannedMedia(url, kind))
+            val poster = obj.optString("poster").takeIf { it.isNotBlank() && it != "null" }
+            result.add(ScannedMedia(url, kind, poster))
         }
         return result
     }
 
-    /** Builds unique, filesystem-safe file names for a freshly scanned list of media. */
-    fun buildFileNames(scanned: List<ScannedMedia>): List<String> {
+    /**
+     * Builds unique, filesystem-safe file names for a freshly scanned list of media.
+     * [alreadyUsedNames] lets repeated scans (e.g. after scrolling for more lazy-loaded
+     * content) avoid colliding with files already shown from an earlier scan.
+     */
+    fun buildFileNames(scanned: List<ScannedMedia>, alreadyUsedNames: Set<String> = emptySet()): List<String> {
         val usedNames = mutableMapOf<String, Int>()
+        alreadyUsedNames.forEach { usedNames[it] = 1 }
         return scanned.mapIndexed { index, media ->
             var name = deriveFileName(media.url, media.kind, index + 1)
             val occurrence = usedNames.getOrDefault(name, 0)
@@ -87,6 +114,7 @@ object MediaScanner {
                 } else {
                     "${name}_$occurrence"
                 }
+                usedNames[name] = 1
             }
             name
         }

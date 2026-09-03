@@ -29,6 +29,8 @@ class MediaListAdapter(
         b.checkbox.isEnabled = item.status == DownloadStatus.IDLE
         b.checkbox.setOnCheckedChangeListener { _, _ -> onToggle(item.id) }
 
+        b.thumbnail.setImageBitmap(item.thumbnail)
+
         b.fileName.text = item.fileName
         val kindLabel = if (item.kind == MediaKind.GIF) "GIF" else "Video"
         val sizeLabel = item.sizeBytes?.let { formatFileSize(it) } ?: context.getString(R.string.size_unknown)
