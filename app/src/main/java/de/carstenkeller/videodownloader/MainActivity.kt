@@ -373,8 +373,19 @@ class MainActivity : AppCompatActivity() {
             if (referer != null) headers["Referer"] = referer
             NetworkHeaders.cookiesFor(url)?.let { headers["Cookie"] = it }
             retriever.setDataSource(url, headers)
-            return retriever.getFrameAtTime(1_000_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                ?: retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+
+            // A fixed 1-second mark landed on a blank/solid intro frame for some very short
+            // (~1-2s) looping clips - reported as a "successful" thumbnail that just looked
+            // empty, since a still-blank decode isn't an exception. Picking a point roughly a
+            // third into the clip's own duration, and OPTION_CLOSEST (exact decode) instead of
+            // OPTION_CLOSEST_SYNC (nearest keyframe only), is more likely to land on an actual
+            // content frame instead of the same first keyframe most short clips would give.
+            val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toLongOrNull()
+            val targetUs = if (durationMs != null && durationMs > 0) (durationMs * 1000L) / 3 else 300_000L
+
+            return retriever.getFrameAtTime(targetUs, MediaMetadataRetriever.OPTION_CLOSEST)
+                ?: retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST)
                 ?: throw IllegalStateException("Kein Frame extrahierbar")
         } finally {
             retriever.release()
