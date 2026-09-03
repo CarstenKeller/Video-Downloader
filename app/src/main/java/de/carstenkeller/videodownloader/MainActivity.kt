@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Bundle
@@ -21,10 +22,14 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import de.carstenkeller.videodownloader.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.nio.ByteBuffer
+import kotlin.coroutines.resume
 
 private const val DEFAULT_URL = "https://www.google.com"
 
@@ -162,18 +167,64 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * Runs a JS expression and suspends until the result comes back, instead of the raw
+     * callback-based evaluateJavascript API - lets scanCurrentPage() read as ordinary
+     * sequential code even though it now does several JS round-trips (scrolling, then
+     * scanning) instead of just one.
+     */
+    private suspend fun evalJs(script: String): String? = suspendCancellableCoroutine { cont ->
+        binding.webView.evaluateJavascript(script) { result ->
+            if (cont.isActive) cont.resume(result)
+        }
+    }
+
+    /**
+     * Scrolls the page from top to bottom in steps, pausing between each so that
+     * scroll-triggered lazy-loading (IntersectionObserver-based images/videos, "load more"
+     * sections) has a chance to fire - the same mechanism a manual scroll relies on, just
+     * driven from code so the user doesn't have to do it by hand before every scan.
+     *
+     * This is a best-effort simulation, not a guarantee: a page that only creates video
+     * elements once truly visible on screen (rather than pre-loading nearby content) will
+     * still only reveal as much as this scroll budget covers, and an infinite-scroll feed
+     * has no real "bottom" - the step/time cap below is what keeps this from running
+     * forever on one.
+     */
+    private suspend fun autoScrollThroughPage() {
+        var lastHeight = -1.0
+        var steps = 0
+        while (steps < MAX_AUTO_SCROLL_STEPS) {
+            evalJs("window.scrollBy(0, Math.round(window.innerHeight * 0.85));")
+            delay(AUTO_SCROLL_STEP_DELAY_MS)
+            val height = evalJs(
+                "Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);"
+            )?.toDoubleOrNull() ?: break
+            val scrollY = evalJs("window.scrollY;")?.toDoubleOrNull() ?: 0.0
+            steps++
+            val reachedBottom = scrollY + binding.webView.height >= height - 50
+            if (reachedBottom && height <= lastHeight + 5) break
+            lastHeight = height
+        }
+        evalJs("window.scrollTo(0, 0);")
+        delay(150)
+    }
+
+    /**
      * Scans the current page and *merges* new finds into the existing list rather than
-     * replacing it, so scrolling to load more lazy-loaded media and scanning again grows
-     * the list instead of resetting it. Also recurses into same-origin iframes (see
+     * replacing it, so scanning again (e.g. after the page itself loaded more content)
+     * grows the list instead of resetting it. Also recurses into same-origin iframes (see
      * MediaScanner.SCAN_JS); cross-origin iframes cannot be inspected at all - the
      * browser's same-origin policy blocks that unconditionally, not just here.
      */
     private fun scanCurrentPage() {
-        // Immediate feedback on tap, independent of how long evaluateJavascript takes - so a
-        // slow or failed scan reads as "working" rather than as the button doing nothing.
+        // Immediate feedback on tap, independent of how long the scroll+scan takes - so it
+        // reads as "working" rather than as the button doing nothing.
         binding.btnScan.isEnabled = false
-        binding.webView.evaluateJavascript(MediaScanner.SCAN_JS) { rawResult ->
+        lifecycleScope.launch {
+            autoScrollThroughPage()
+            val rawResult = evalJs(MediaScanner.SCAN_JS)
             binding.btnScan.isEnabled = true
+
             val scanned = MediaScanner.parseResult(rawResult)
             val existing = viewModel.items.value
             val existingUrls = existing.map { it.url }.toSet()
@@ -181,11 +232,11 @@ class MainActivity : AppCompatActivity() {
 
             if (newScanned.isEmpty()) {
                 val messageRes = if (existing.isEmpty()) R.string.no_media_found else R.string.no_new_media_found
-                Toast.makeText(this, messageRes, Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity, messageRes, Toast.LENGTH_SHORT).show()
                 if (existing.isNotEmpty() && supportFragmentManager.findFragmentByTag(MEDIA_LIST_TAG) == null) {
                     MediaListBottomSheet().show(supportFragmentManager, MEDIA_LIST_TAG)
                 }
-                return@evaluateJavascript
+                return@launch
             }
 
             val fileNames = MediaScanner.buildFileNames(newScanned, existing.map { it.fileName }.toSet())
@@ -277,7 +328,24 @@ class MainActivity : AppCompatActivity() {
         httpClient.newCall(builder.build()).execute().use { response ->
             if (!response.isSuccessful) return null
             val bytes = response.body?.bytes() ?: return null
-            return BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            return decodeBitmap(bytes)
+        }
+    }
+
+    /**
+     * ImageDecoder (API 28+) handles GIF and other formats more robustly than the legacy
+     * BitmapFactory in some edge cases; falls back to BitmapFactory for anything it rejects.
+     */
+    private fun decodeBitmap(bytes: ByteArray): Bitmap? {
+        return try {
+            val source = ImageDecoder.createSource(ByteBuffer.wrap(bytes))
+            ImageDecoder.decodeBitmap(source) { decoder, _, _ -> decoder.isMutableRequired = false }
+        } catch (e: Exception) {
+            try {
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            } catch (e2: Exception) {
+                null
+            }
         }
     }
 
@@ -298,6 +366,12 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val MEDIA_LIST_TAG = "media_list"
+
+        // Auto-scroll budget before scanning: up to 20 steps of ~85% viewport height each,
+        // waiting 400ms between steps for lazy-loaded content to arrive. Also the safety cap
+        // that keeps this from scrolling forever on a genuinely infinite-scroll page.
+        private const val MAX_AUTO_SCROLL_STEPS = 20
+        private const val AUTO_SCROLL_STEP_DELAY_MS = 400L
 
         // Some CDNs reject requests without a browser-like User-Agent (OkHttp's and
         // MediaMetadataRetriever's defaults are easy to fingerprint and block). Used for
