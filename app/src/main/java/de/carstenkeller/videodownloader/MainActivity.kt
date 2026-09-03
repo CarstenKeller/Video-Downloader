@@ -273,10 +273,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Prefers a candidate of the exact same kind/looksLikeGif; falls back to matching kind. */
+    /**
+     * Matches by "what it looks like" (GIF-like vs. a genuine video), not by the exact
+     * underlying kind - a real bug found from testing: the original preview is very often a
+     * <video loop muted> ("GIF-like" but kind == VIDEO), while its source page serves the
+     * actual GIF as a plain <img src="*.gif"> (kind == GIF). A strict kind match rejected
+     * that source-page candidate entirely, so most upgrades silently found nothing even
+     * though a perfectly good replacement existed right there.
+     */
     private fun pickBestMatch(target: ScannedMedia, candidates: List<ScannedMedia>): ScannedMedia? {
-        return candidates.firstOrNull { it.kind == target.kind && it.looksLikeGif == target.looksLikeGif }
-            ?: candidates.firstOrNull { it.kind == target.kind }
+        fun isGifLike(m: ScannedMedia) = m.kind == MediaKind.GIF || m.looksLikeGif
+        return if (isGifLike(target)) {
+            candidates.firstOrNull { isGifLike(it) }
+        } else {
+            candidates.firstOrNull { it.kind == MediaKind.VIDEO && !it.looksLikeGif }
+        }
     }
 
     /**
