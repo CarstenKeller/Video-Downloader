@@ -34,19 +34,29 @@ object MediaScanner {
           }
           var videoExt = /\.(mp4|webm|mov|m4v|mkv|3gp|avi)(\?|#|${'$'})/i;
           var gifExt = /\.gif(\?|#|${'$'})/i;
+          var lazyAttrs = ['src', 'data-src', 'data-original', 'data-lazy-src', 'data-video-src', 'data-url'];
+          function candidateSrcs(el) {
+            var out = [];
+            if (el.currentSrc) out.push(el.currentSrc);
+            lazyAttrs.forEach(function(attr) {
+              var v = el.getAttribute(attr);
+              if (v) out.push(v);
+            });
+            return out;
+          }
           function scanDocument(doc) {
             try {
               doc.querySelectorAll('video').forEach(function(v) {
                 var poster = v.getAttribute('poster');
-                add(v.currentSrc, 'video', poster, doc);
-                add(v.getAttribute('src'), 'video', poster, doc);
+                candidateSrcs(v).forEach(function(src) { add(src, 'video', poster, doc); });
                 v.querySelectorAll('source').forEach(function(s) {
-                  add(s.getAttribute('src'), 'video', poster, doc);
+                  candidateSrcs(s).forEach(function(src) { add(src, 'video', poster, doc); });
                 });
               });
               doc.querySelectorAll('img').forEach(function(img) {
-                var s = img.currentSrc || img.getAttribute('src') || '';
-                if (gifExt.test(s)) add(s, 'gif', null, doc);
+                candidateSrcs(img).forEach(function(s) {
+                  if (gifExt.test(s)) add(s, 'gif', null, doc);
+                });
               });
               doc.querySelectorAll('a[href]').forEach(function(a) {
                 var href = a.getAttribute('href') || '';

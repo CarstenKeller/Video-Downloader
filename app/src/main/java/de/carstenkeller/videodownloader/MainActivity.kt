@@ -36,6 +36,7 @@ class MainActivity : AppCompatActivity() {
 
     private var customView: View? = null
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
+    private var lastHost: String? = null
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -72,9 +73,16 @@ class MainActivity : AppCompatActivity() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 binding.progressBar.visibility = View.VISIBLE
                 if (url != null) binding.addressBar.setText(url)
-                // A new page navigation (not a same-page scan) starts a fresh media list -
-                // otherwise finds from a previously visited page would linger forever.
-                viewModel.setItems(emptyList())
+
+                // Only clear the media list when navigating to a genuinely different site
+                // (different host). Many pages reload/paginate within the same site while
+                // scrolling (infinite scroll, "load more"), which also fires onPageStarted -
+                // clearing on every one of those would wipe out finds mid-scroll.
+                val host = url?.let { runCatching { Uri.parse(it).host }.getOrNull() }
+                if (host != null && host != lastHost) {
+                    viewModel.setItems(emptyList())
+                }
+                if (host != null) lastHost = host
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
@@ -161,20 +169,27 @@ class MainActivity : AppCompatActivity() {
      * browser's same-origin policy blocks that unconditionally, not just here.
      */
     private fun scanCurrentPage() {
+        // Immediate feedback on tap, independent of how long evaluateJavascript takes - so a
+        // slow or failed scan reads as "working" rather than as the button doing nothing.
+        binding.btnScan.isEnabled = false
         binding.webView.evaluateJavascript(MediaScanner.SCAN_JS) { rawResult ->
+            binding.btnScan.isEnabled = true
             val scanned = MediaScanner.parseResult(rawResult)
             val existing = viewModel.items.value
             val existingUrls = existing.map { it.url }.toSet()
             val newScanned = scanned.filter { it.url !in existingUrls }
 
             if (newScanned.isEmpty()) {
-                if (existing.isEmpty()) {
-                    Toast.makeText(this, R.string.no_media_found, Toast.LENGTH_SHORT).show()
+                val messageRes = if (existing.isEmpty()) R.string.no_media_found else R.string.no_new_media_found
+                Toast.makeText(this, messageRes, Toast.LENGTH_SHORT).show()
+                if (existing.isNotEmpty() && supportFragmentManager.findFragmentByTag(MEDIA_LIST_TAG) == null) {
+                    MediaListBottomSheet().show(supportFragmentManager, MEDIA_LIST_TAG)
                 }
                 return@evaluateJavascript
             }
 
             val fileNames = MediaScanner.buildFileNames(newScanned, existing.map { it.fileName }.toSet())
+            val currentPageUrl = binding.webView.url
             val newItems = newScanned.mapIndexed { index, media ->
                 MediaItem(
                     id = media.url,
@@ -190,7 +205,7 @@ class MainActivity : AppCompatActivity() {
                 MediaListBottomSheet().show(supportFragmentManager, MEDIA_LIST_TAG)
             }
             fetchSizes(newItems)
-            fetchThumbnails(newItems)
+            fetchThumbnails(newItems, currentPageUrl)
         }
     }
 
@@ -235,14 +250,14 @@ class MainActivity : AppCompatActivity() {
      * remote file as it needs - not the whole thing, but still real network/data usage per
      * video, unlike the poster case.
      */
-    private fun fetchThumbnails(items: List<MediaItem>) {
+    private fun fetchThumbnails(items: List<MediaItem>, pageUrl: String?) {
         items.forEach { item ->
             lifecycleScope.launch(Dispatchers.IO) {
                 val bitmap = try {
                     when {
-                        item.kind == MediaKind.GIF -> loadBitmapFromUrl(item.url)
-                        item.posterUrl != null -> loadBitmapFromUrl(item.posterUrl)
-                        else -> extractVideoFrame(item.url)
+                        item.kind == MediaKind.GIF -> loadBitmapFromUrl(item.url, pageUrl)
+                        item.posterUrl != null -> loadBitmapFromUrl(item.posterUrl, pageUrl)
+                        else -> extractVideoFrame(item.url, pageUrl)
                     }
                 } catch (e: Exception) {
                     null
@@ -256,19 +271,22 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun loadBitmapFromUrl(url: String): Bitmap? {
-        val request = Request.Builder().url(url).header("User-Agent", USER_AGENT).build()
-        httpClient.newCall(request).execute().use { response ->
+    private fun loadBitmapFromUrl(url: String, referer: String?): Bitmap? {
+        val builder = Request.Builder().url(url).header("User-Agent", USER_AGENT)
+        if (referer != null) builder.header("Referer", referer)
+        httpClient.newCall(builder.build()).execute().use { response ->
             if (!response.isSuccessful) return null
             val bytes = response.body?.bytes() ?: return null
             return BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
         }
     }
 
-    private fun extractVideoFrame(url: String): Bitmap? {
+    private fun extractVideoFrame(url: String, referer: String?): Bitmap? {
         val retriever = MediaMetadataRetriever()
         return try {
-            retriever.setDataSource(url, hashMapOf("User-Agent" to USER_AGENT))
+            val headers = mutableMapOf("User-Agent" to USER_AGENT)
+            if (referer != null) headers["Referer"] = referer
+            retriever.setDataSource(url, headers)
             retriever.getFrameAtTime(1_000_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                 ?: retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
         } catch (e: Exception) {

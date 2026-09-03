@@ -66,6 +66,9 @@
             android:paddingBottom="8dp"
             android:selectAllOnFocus="true"
             android:singleLine="true"
+            android:textColor="#000000"
+            android:textColorHint="#757575"
+            android:textCursorDrawable="@null"
             android:textSize="14sp" />
 
         <ImageButton
