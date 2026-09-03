@@ -52,6 +52,14 @@ class MainActivity : AppCompatActivity() {
     // time - this serializes crawlSourcePage() calls instead of letting them race on it.
     private val crawlerMutex = Mutex()
 
+    // HLS/DASH manifest URLs sniffed from network traffic (see shouldInterceptRequest) for the
+    // currently loaded page. Chromium (Android WebView's engine) has no native HLS/DASH
+    // playback, so sites use a JS player that fetches the manifest itself - it practically
+    // never shows up as a plain <video src> the DOM scanner could see, only as a network
+    // request. A thread-safe set since shouldInterceptRequest can be called off the main
+    // thread; cleared on an actual host change, same as the media list.
+    private val detectedStreamUrls = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -96,6 +104,7 @@ class MainActivity : AppCompatActivity() {
                 val host = url?.let { runCatching { Uri.parse(it).host }.getOrNull() }
                 if (host != null && host != lastHost) {
                     viewModel.setItems(emptyList())
+                    detectedStreamUrls.clear()
                 }
                 if (host != null) lastHost = host
             }
@@ -103,6 +112,20 @@ class MainActivity : AppCompatActivity() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 binding.progressBar.visibility = View.GONE
                 if (url != null) binding.addressBar.setText(url)
+            }
+
+            override fun shouldInterceptRequest(
+                view: WebView?,
+                request: android.webkit.WebResourceRequest?
+            ): android.webkit.WebResourceResponse? {
+                // Observation only - always returns null so normal loading continues
+                // untouched; this just lets us see manifest URLs the page's own JS player
+                // fetches, which the DOM scanner has no way to see at all.
+                val path = request?.url?.path?.lowercase()
+                if (path != null && (path.endsWith(".m3u8") || path.endsWith(".mpd"))) {
+                    detectedStreamUrls.add(request.url.toString())
+                }
+                return null
             }
         }
 
@@ -498,6 +521,136 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * Resolves any HLS/DASH manifest URLs sniffed since the last navigation (see
+     * shouldInterceptRequest/[detectedStreamUrls]) into downloadable items, skipping any
+     * already represented in the list. Returns how many new items were added. A manifest is
+     * only sniffed once the page's own JS player actually requests it - if the video is
+     * click-to-play and was never started, there is nothing to detect yet; pressing play once
+     * before scanning again picks it up.
+     */
+    private suspend fun resolveDetectedStreams(pageUrl: String?): Int {
+        val existingUrls = viewModel.items.value.map { it.url }.toSet()
+        val toResolve = detectedStreamUrls.filter { it !in existingUrls }
+        var added = 0
+        for (manifestUrl in toResolve) {
+            added += resolveAndAddStream(manifestUrl, pageUrl)
+        }
+        return added
+    }
+
+    private suspend fun fetchTextBody(url: String, referer: String? = null): String? = withContext(Dispatchers.IO) {
+        try {
+            val builder = withCommonHeaders(Request.Builder().url(url), url)
+            referer?.let { builder.header("Referer", it) }
+            httpClient.newCall(builder.build()).execute().use { response ->
+                if (!response.isSuccessful) null else response.body?.string()
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun deriveStreamBaseName(manifestUrl: String): String {
+        val lastSegment = try {
+            Uri.parse(manifestUrl).lastPathSegment?.substringBefore('?')?.substringBeforeLast('.')
+        } catch (e: Exception) {
+            null
+        }
+        val name = lastSegment?.let { runCatching { Uri.decode(it) }.getOrDefault(it) }?.takeIf { it.isNotBlank() }
+            ?: "stream"
+        return name.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+    }
+
+    /**
+     * Fetches and parses one detected manifest, adding either a downloadable item or (for
+     * encrypted HLS or a DASH segment-addressing mode this app doesn't handle) a disabled
+     * placeholder row so the user at least sees that something was found. Returns 1 if an item
+     * was added, 0 otherwise (including "already handled" and outright fetch/parse failures -
+     * treated the same as a normal scan pass finding nothing, not surfaced as a hard error).
+     */
+    private suspend fun resolveAndAddStream(manifestUrl: String, pageUrl: String?): Int {
+        val isDash = manifestUrl.substringBefore('?').lowercase().endsWith(".mpd")
+        return if (isDash) {
+            val text = fetchTextBody(manifestUrl, pageUrl) ?: return 0
+            when (val result = StreamManifest.parseDash(text, manifestUrl)) {
+                is StreamManifest.DashResult.Unsupported -> addUnsupportedStreamItem(manifestUrl, pageUrl, result.reason)
+                is StreamManifest.DashResult.Plan -> addStreamItem(manifestUrl, pageUrl, result.plan)
+            }
+        } else {
+            var url = manifestUrl
+            var mediaPlaylist: HlsParseResult? = null
+            repeat(2) {
+                if (mediaPlaylist != null) return@repeat
+                val text = fetchTextBody(url, pageUrl) ?: return 0
+                val parsed = StreamManifest.parseHls(text, url)
+                if (parsed.variantUrl != null) url = parsed.variantUrl else mediaPlaylist = parsed
+            }
+            val result = mediaPlaylist ?: return 0
+            when {
+                result.encrypted -> addUnsupportedStreamItem(manifestUrl, pageUrl, "Verschlüsselter Stream nicht unterstützt")
+                result.segmentUrls.isEmpty() -> 0
+                else -> {
+                    val ext = result.segmentUrls.first().substringAfterLast('.').substringBefore('?').lowercase()
+                    val outputExt = if (ext == "m4s" || ext == "mp4") "mp4" else if (ext == "ts") "ts" else "ts"
+                    addStreamItem(
+                        manifestUrl, pageUrl,
+                        StreamDownloadPlan(StreamKind.HLS, result.initSegmentUrl, result.segmentUrls, outputExtension = outputExt)
+                    )
+                }
+            }
+        }
+    }
+
+    private suspend fun addStreamItem(manifestUrl: String, pageUrl: String?, plan: StreamDownloadPlan): Int =
+        withContext(Dispatchers.Main) {
+            val existing = viewModel.items.value
+            if (existing.any { it.url == manifestUrl }) return@withContext 0
+            val baseName = deriveStreamBaseName(manifestUrl)
+            // A DASH stream with separate audio/video representations can't be muxed into one
+            // file here (that needs a real media container library this project doesn't have)
+            // - saving just the video track is an honest, working partial result rather than a
+            // silently broken combined file.
+            val note = if (plan.audioSegmentUrls.isNotEmpty()) {
+                "Video und Audio sind getrennte Spuren und werden nicht automatisch zusammengeführt - Datei ist stumm"
+            } else null
+            val item = MediaItem(
+                id = manifestUrl,
+                url = manifestUrl,
+                kind = MediaKind.VIDEO,
+                fileName = "$baseName.${plan.outputExtension}",
+                sourcePageUrl = pageUrl,
+                streamPlan = plan.copy(audioInitUrl = null, audioSegmentUrls = emptyList()),
+                streamNote = note
+            )
+            viewModel.setItems(existing + item)
+            if (supportFragmentManager.findFragmentByTag(MEDIA_LIST_TAG) == null) {
+                MediaListBottomSheet().show(supportFragmentManager, MEDIA_LIST_TAG)
+            }
+            1
+        }
+
+    private suspend fun addUnsupportedStreamItem(manifestUrl: String, pageUrl: String?, reason: String): Int =
+        withContext(Dispatchers.Main) {
+            val existing = viewModel.items.value
+            if (existing.any { it.url == manifestUrl }) return@withContext 0
+            val item = MediaItem(
+                id = manifestUrl,
+                url = manifestUrl,
+                kind = MediaKind.VIDEO,
+                fileName = "${deriveStreamBaseName(manifestUrl)}.mp4",
+                sourcePageUrl = pageUrl,
+                selected = false,
+                downloadDisabled = true,
+                streamNote = "Stream erkannt, aber nicht unterstützt: $reason"
+            )
+            viewModel.setItems(existing + item)
+            if (supportFragmentManager.findFragmentByTag(MEDIA_LIST_TAG) == null) {
+                MediaListBottomSheet().show(supportFragmentManager, MEDIA_LIST_TAG)
+            }
+            1
+        }
+
+    /**
      * Scans the current page while driving it top-to-bottom in steps, scanning again after
      * *each* step - not just once at the end. This matters: many media-heavy pages
      * virtualize their DOM, removing off-screen <video>/<img> elements again once you
@@ -547,6 +700,10 @@ class MainActivity : AppCompatActivity() {
                 lastHeight = height
             }
             evalJs(binding.webView, "window.scrollTo(0, 0);")
+
+            // Streaming video (HLS/DASH) is detected independently of the DOM scan - see
+            // shouldInterceptRequest - so this always runs, not just as a last-resort fallback.
+            totalNew += resolveDetectedStreams(binding.webView.url)
 
             // Nothing found the fast way (no <video>/<img src=*.gif> element in the DOM at
             // all) - fall back to crawling result cards that only show a thumbnail + duration

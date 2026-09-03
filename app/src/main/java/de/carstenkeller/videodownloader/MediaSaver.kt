@@ -8,6 +8,7 @@ import android.provider.MediaStore
 import android.webkit.MimeTypeMap
 import java.io.IOException
 import java.io.InputStream
+import java.io.OutputStream
 
 /**
  * Saves downloaded media into the device's shared media collection (visible in Photos /
@@ -30,6 +31,28 @@ object MediaSaver {
         fileName: String,
         input: InputStream,
         onProgress: (bytesWritten: Long) -> Unit
+    ): SaveResult = saveToGallery(context, kind, fileName) { output ->
+        val buffer = ByteArray(64 * 1024)
+        var total = 0L
+        var read: Int
+        while (input.read(buffer).also { read = it } >= 0) {
+            output.write(buffer, 0, read)
+            total += read
+            onProgress(total)
+        }
+    }
+
+    /**
+     * Same MediaStore insert/pending/finalize handling as the [InputStream] overload, but lets
+     * the caller write directly instead of copying from one single stream - needed for
+     * streaming video (HLS/DASH), whose content comes from several sequential HTTP responses
+     * (one per segment) rather than one continuous stream.
+     */
+    fun saveToGallery(
+        context: Context,
+        kind: MediaKind,
+        fileName: String,
+        write: (OutputStream) -> Unit
     ): SaveResult {
         val resolver = context.contentResolver
         val mimeType = guessMimeType(fileName, kind)
@@ -55,16 +78,7 @@ object MediaSaver {
         return try {
             val out = resolver.openOutputStream(itemUri)
                 ?: throw IOException("Kein Output-Stream verfügbar")
-            out.use { output ->
-                val buffer = ByteArray(64 * 1024)
-                var total = 0L
-                var read: Int
-                while (input.read(buffer).also { read = it } >= 0) {
-                    output.write(buffer, 0, read)
-                    total += read
-                    onProgress(total)
-                }
-            }
+            out.use { output -> write(output) }
             values.clear()
             values.put(MediaStore.MediaColumns.IS_PENDING, 0)
             resolver.update(itemUri, values, null, null)

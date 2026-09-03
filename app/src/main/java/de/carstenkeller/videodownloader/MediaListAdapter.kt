@@ -29,11 +29,12 @@ class MediaListAdapter(
         val b = holder.binding
         val context = b.root.context
 
+        val interactive = item.status == DownloadStatus.IDLE && !item.downloadDisabled
         b.checkbox.isChecked = item.selected
-        b.checkbox.isEnabled = item.status == DownloadStatus.IDLE
-        b.root.isEnabled = item.status == DownloadStatus.IDLE
+        b.checkbox.isEnabled = interactive
+        b.root.isEnabled = interactive
         b.root.setOnClickListener {
-            if (item.status == DownloadStatus.IDLE) onToggle(item.id)
+            if (interactive) onToggle(item.id)
         }
 
         if (item.thumbnail != null) {
@@ -48,7 +49,8 @@ class MediaListAdapter(
         // looksLikeGif: a <video loop muted> that behaves like a GIF but is a real video file
         // (e.g. saved as .mp4) - labeled "GIF" here to match how it looks, without changing
         // what's actually saved.
-        val kindLabel = if (item.kind == MediaKind.GIF || item.looksLikeGif) "GIF" else "Video"
+        val baseKindLabel = if (item.kind == MediaKind.GIF || item.looksLikeGif) "GIF" else "Video"
+        val kindLabel = if (item.streamPlan != null || item.downloadDisabled) "$baseKindLabel (Stream)" else baseKindLabel
         val sizeLabel = item.sizeBytes?.let { formatFileSize(it) } ?: context.getString(R.string.size_unknown)
         var subtitle = "$kindLabel · $sizeLabel"
         if (item.thumbnail == null && item.thumbnailError != null) {
@@ -57,6 +59,7 @@ class MediaListAdapter(
         // Debug-style diagnostic for the source-page crawl - see MainActivity.
         // upgradeFromSourceLinks - shown so real behavior can be read off the device.
         item.crawlStatus?.let { subtitle += "\nℹ $it" }
+        item.streamNote?.let { subtitle += "\nℹ $it" }
         b.subtitle.text = subtitle
 
         when (item.status) {

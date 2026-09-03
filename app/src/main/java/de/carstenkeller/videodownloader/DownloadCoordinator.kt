@@ -37,6 +37,15 @@ class DownloadCoordinator(
         onProgress: (id: String, progress: Int) -> Unit,
         onDone: (id: String, success: Boolean, error: String?) -> Unit
     ) {
+        if (item.downloadDisabled) {
+            onDone(item.id, false, "Nicht unterstützt")
+            return
+        }
+        val plan = item.streamPlan
+        if (plan != null) {
+            downloadStream(item, plan, onProgress, onDone)
+            return
+        }
         try {
             val requestBuilder = Request.Builder().url(item.url).header("User-Agent", NetworkHeaders.USER_AGENT)
             item.sourcePageUrl?.let { requestBuilder.header("Referer", it) }
@@ -56,6 +65,49 @@ class DownloadCoordinator(
                     is MediaSaver.SaveResult.Success -> onDone(item.id, true, null)
                     is MediaSaver.SaveResult.Failure -> onDone(item.id, false, result.message)
                 }
+            }
+        } catch (e: Exception) {
+            onDone(item.id, false, e.message ?: "Fehler")
+        }
+    }
+
+    /**
+     * HLS/DASH streaming video comes as many small segments (plus an optional init segment for
+     * fragmented MP4/CMAF streams) rather than one file - each is fetched in order and its
+     * bytes written directly to the same output, which is a valid way to reassemble both
+     * MPEG-TS segments (simple concatenation) and fMP4/CMAF segments (init segment followed by
+     * fragments) into one playable file.
+     */
+    private fun downloadStream(
+        item: MediaItem,
+        plan: StreamDownloadPlan,
+        onProgress: (id: String, progress: Int) -> Unit,
+        onDone: (id: String, success: Boolean, error: String?) -> Unit
+    ) {
+        val segments = listOfNotNull(plan.videoInitUrl) + plan.videoSegmentUrls
+        if (segments.isEmpty()) {
+            onDone(item.id, false, "Keine Segmente im Stream gefunden")
+            return
+        }
+        try {
+            val result = MediaSaver.saveToGallery(appContext, item.kind, item.fileName) { output ->
+                segments.forEachIndexed { index, segmentUrl ->
+                    val requestBuilder = Request.Builder().url(segmentUrl).header("User-Agent", NetworkHeaders.USER_AGENT)
+                    item.sourcePageUrl?.let { requestBuilder.header("Referer", it) }
+                    NetworkHeaders.cookiesFor(segmentUrl)?.let { requestBuilder.header("Cookie", it) }
+                    client.newCall(requestBuilder.build()).execute().use { response ->
+                        if (!response.isSuccessful) {
+                            throw IOException("Segment ${index + 1}/${segments.size}: HTTP ${response.code}")
+                        }
+                        val body = response.body ?: throw IOException("Segment ${index + 1}/${segments.size}: leere Antwort")
+                        body.byteStream().copyTo(output)
+                    }
+                    onProgress(item.id, ((index + 1) * 100) / segments.size)
+                }
+            }
+            when (result) {
+                is MediaSaver.SaveResult.Success -> onDone(item.id, true, null)
+                is MediaSaver.SaveResult.Failure -> onDone(item.id, false, result.message)
             }
         } catch (e: Exception) {
             onDone(item.id, false, e.message ?: "Fehler")

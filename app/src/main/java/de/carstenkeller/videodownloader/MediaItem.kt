@@ -29,5 +29,19 @@ data class MediaItem(
     // shown in the list so real crawl behavior can be read off the device instead of guessed
     // at - previous guesses about *why* a crawl didn't improve an item have repeatedly not
     // matched what was actually happening.
-    val crawlStatus: String? = null
+    val crawlStatus: String? = null,
+    // Present for HLS/DASH streaming video (see StreamManifest) - url holds the manifest
+    // (.m3u8/.mpd) itself for identity/display, while this plan holds the resolved segment
+    // list DownloadCoordinator actually fetches and concatenates.
+    val streamPlan: StreamDownloadPlan? = null,
+    // Informational text for streams that couldn't be fully resolved into one downloadable
+    // file (e.g. separate audio/video tracks saved as two files, or an unsupported segment
+    // addressing mode) - shown in the list like crawlStatus.
+    val streamNote: String? = null,
+    // True for a detected stream this app genuinely cannot download (encrypted HLS,
+    // byte-range DASH, ...) - streamPlan is null in that case, so there is nothing a normal
+    // download attempt could act on; the row is shown (so the user knows it was found) but not
+    // selectable, rather than letting a download attempt save the raw manifest text as if it
+    // were the video.
+    val downloadDisabled: Boolean = false
 )
