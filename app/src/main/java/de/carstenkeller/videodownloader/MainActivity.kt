@@ -222,7 +222,8 @@ class MainActivity : AppCompatActivity() {
                 fileName = fileNames[index],
                 posterUrl = media.posterUrl,
                 sourcePageUrl = currentPageUrl,
-                looksLikeGif = media.looksLikeGif
+                looksLikeGif = media.looksLikeGif,
+                crawlStatus = if (media.sourceLink == null) "Quelle: kein Link auf der Seite gefunden" else null
             )
         }
 
@@ -252,9 +253,19 @@ class MainActivity : AppCompatActivity() {
         pairs.forEach { (media, item) ->
             val sourceLink = media.sourceLink ?: return@forEach
             lifecycleScope.launch {
+                viewModel.updateItem(item.id) { it.copy(crawlStatus = "Quelle wird geprüft…") }
                 val candidates = crawlSourcePage(sourceLink)
-                val match = pickBestMatch(media, candidates) ?: return@launch
-                if (match.url == item.url) return@launch
+                val match = pickBestMatch(media, candidates)
+                val status = when {
+                    candidates.isEmpty() -> "Quelle: Crawl fand keine Medien (Timeout oder leere Seite)"
+                    match == null -> "Quelle: ${candidates.size} Medien gefunden, keins passte"
+                    match.url == item.url -> "Quelle: identisch mit Vorschau"
+                    else -> null // success - cleared below, the upgrade itself is visible
+                }
+                if (match == null || match.url == item.url) {
+                    viewModel.updateItem(item.id) { it.copy(crawlStatus = status) }
+                    return@launch
+                }
 
                 val newFileName = MediaScanner.deriveFileName(match.url, match.kind, 1)
                 viewModel.updateItem(item.id) {
@@ -267,7 +278,8 @@ class MainActivity : AppCompatActivity() {
                         fileName = newFileName,
                         sizeBytes = null,
                         thumbnail = null,
-                        thumbnailError = null
+                        thumbnailError = null,
+                        crawlStatus = null
                     )
                 }
                 val updated = viewModel.items.value.find { it.id == item.id } ?: return@launch
@@ -431,7 +443,20 @@ class MainActivity : AppCompatActivity() {
 
             binding.btnScan.isEnabled = true
             if (totalNew == 0) {
-                Toast.makeText(this@MainActivity, R.string.no_media_found, Toast.LENGTH_SHORT).show()
+                // Diagnostic detail appended so a "nothing found" report says exactly what was
+                // tried, rather than just "nothing" - the previous silent version gave no way
+                // to tell whether the duration-badge link heuristic even matched anything on
+                // the page at all.
+                val detail = if (candidateLinks.isNotEmpty()) {
+                    " (${candidateLinks.size} Link-Kandidat(en) geprüft, keine Medien gefunden)"
+                } else {
+                    " (keine Link-Kandidaten auf der Seite gefunden)"
+                }
+                Toast.makeText(
+                    this@MainActivity,
+                    getString(R.string.no_media_found) + detail,
+                    Toast.LENGTH_LONG
+                ).show()
             }
         }
     }

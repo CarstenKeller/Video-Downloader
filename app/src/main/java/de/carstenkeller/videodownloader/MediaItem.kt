@@ -24,5 +24,10 @@ data class MediaItem(
     val progress: Int = -1,
     val errorMessage: String? = null,
     val thumbnail: Bitmap? = null,
-    val thumbnailError: String? = null
+    val thumbnailError: String? = null,
+    // Diagnostic text for the source-page crawl (see MainActivity.upgradeFromSourceLinks),
+    // shown in the list so real crawl behavior can be read off the device instead of guessed
+    // at - previous guesses about *why* a crawl didn't improve an item have repeatedly not
+    // matched what was actually happening.
+    val crawlStatus: String? = null
 )

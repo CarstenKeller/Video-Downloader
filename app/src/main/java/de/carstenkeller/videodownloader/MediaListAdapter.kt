@@ -54,6 +54,9 @@ class MediaListAdapter(
         if (item.thumbnail == null && item.thumbnailError != null) {
             subtitle += "\n⚠ Thumbnail: ${item.thumbnailError}"
         }
+        // Debug-style diagnostic for the source-page crawl - see MainActivity.
+        // upgradeFromSourceLinks - shown so real behavior can be read off the device.
+        item.crawlStatus?.let { subtitle += "\nℹ $it" }
         b.subtitle.text = subtitle
 
         when (item.status) {
