@@ -412,6 +412,16 @@ class MainActivity : AppCompatActivity() {
      * scans again for anything new. If what's revealed itself carries a source link (e.g. a
      * "visit site" link in an opened detail view), follows that one extra hop too.
      *
+     * A confirmed real bug in an earlier version of this function: it only excluded
+     * [targetMediaUrl] from the post-click scan, not everything else already present on the
+     * page before the click. A grid page like Google Images has many other previews already
+     * loaded in the DOM at once, so that "revealed" set was really just whatever other,
+     * unrelated grid item happened to come first - and since a fresh reload of the same URL
+     * produces the same DOM order every time, EVERY item's "upgrade" converged on that same
+     * other item's own short preview, silently overwriting distinct correct downloads with
+     * repeated copies of one wrong file. Fixed by capturing a baseline scan before clicking and
+     * only treating something as "revealed" if it wasn't already present in that baseline.
+     *
      * This is speculative and Google's exact behavior here could not be verified without a
      * live browser to inspect - it depends on the element actually being click-driven, on the
      * resulting UI rendering within the hidden WebView the same way it would visibly, and on
@@ -422,14 +432,18 @@ class MainActivity : AppCompatActivity() {
             if (!loadInCrawler(pageUrl)) return@withLock emptyList()
             delay(CRAWL_SETTLE_DELAY_MS)
 
+            val baselineUrls = MediaScanner.parseResult(evalJs(binding.crawlerWebView, MediaScanner.SCAN_JS))
+                .map { it.url }
+                .toSet() + targetMediaUrl
+
             val clicked = evalJs(binding.crawlerWebView, buildClickOnMediaJs(targetMediaUrl))
             if (clicked != "true") return@withLock emptyList()
             delay(CLICK_REVEAL_DELAY_MS)
 
             var revealed = MediaScanner.parseResult(evalJs(binding.crawlerWebView, MediaScanner.SCAN_JS))
-                .filter { it.url != targetMediaUrl }
+                .filter { it.url !in baselineUrls }
             if (revealed.isEmpty()) {
-                revealed = scanCrawlerWithRetry().filter { it.url != targetMediaUrl }
+                revealed = scanCrawlerWithRetry().filter { it.url !in baselineUrls }
             }
             if (revealed.isEmpty()) return@withLock emptyList()
 
