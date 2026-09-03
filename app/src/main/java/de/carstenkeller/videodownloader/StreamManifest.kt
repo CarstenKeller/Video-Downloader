@@ -205,11 +205,18 @@ object StreamManifest {
                             number++
                         }
                     }
-                } else if (tmpl.duration != null && mediaPresentationDurationSec != null) {
-                    val segDurationSec = tmpl.duration.toDouble() / tmpl.timescale
-                    val count = Math.ceil(mediaPresentationDurationSec / segDurationSec).toLong()
-                    for (n in tmpl.startNumber until tmpl.startNumber + count) {
-                        urls.add(resolve(manifestUrl, tmpl.media.replace("\$Number\$", n.toString())))
+                } else {
+                    // Copied to a local val: mediaPresentationDurationSec is a var captured by
+                    // this closure, so Kotlin won't smart-cast it to non-null after the null
+                    // check below even though nothing here reassigns it.
+                    val totalDurationSec = mediaPresentationDurationSec
+                    val segDuration = tmpl.duration
+                    if (segDuration != null && totalDurationSec != null) {
+                        val segDurationSec = segDuration.toDouble() / tmpl.timescale
+                        val count = Math.ceil(totalDurationSec / segDurationSec).toLong()
+                        for (n in tmpl.startNumber until tmpl.startNumber + count) {
+                            urls.add(resolve(manifestUrl, tmpl.media.replace("\$Number\$", n.toString())))
+                        }
                     }
                 }
                 return init to urls
