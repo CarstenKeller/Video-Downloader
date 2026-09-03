@@ -16,6 +16,11 @@ class MediaListAdapter(
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
         val binding = ItemMediaBinding.inflate(LayoutInflater.from(parent.context), parent, false)
+        // The checkbox is purely a visual indicator here - the whole row is the tap target,
+        // which is both a larger, more reliable target and avoids the checkbox's own touch
+        // handling ever competing with the row's.
+        binding.checkbox.isClickable = false
+        binding.checkbox.isFocusable = false
         return ViewHolder(binding)
     }
 
@@ -24,12 +29,20 @@ class MediaListAdapter(
         val b = holder.binding
         val context = b.root.context
 
-        b.checkbox.setOnCheckedChangeListener(null)
         b.checkbox.isChecked = item.selected
         b.checkbox.isEnabled = item.status == DownloadStatus.IDLE
-        b.checkbox.setOnCheckedChangeListener { _, _ -> onToggle(item.id) }
+        b.root.isEnabled = item.status == DownloadStatus.IDLE
+        b.root.setOnClickListener {
+            if (item.status == DownloadStatus.IDLE) onToggle(item.id)
+        }
 
-        b.thumbnail.setImageBitmap(item.thumbnail)
+        if (item.thumbnail != null) {
+            b.thumbnail.scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
+            b.thumbnail.setImageBitmap(item.thumbnail)
+        } else {
+            b.thumbnail.scaleType = android.widget.ImageView.ScaleType.CENTER_INSIDE
+            b.thumbnail.setImageResource(R.drawable.ic_media_placeholder)
+        }
 
         b.fileName.text = item.fileName
         val kindLabel = if (item.kind == MediaKind.GIF) "GIF" else "Video"

@@ -72,6 +72,9 @@ class MainActivity : AppCompatActivity() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 binding.progressBar.visibility = View.VISIBLE
                 if (url != null) binding.addressBar.setText(url)
+                // A new page navigation (not a same-page scan) starts a fresh media list -
+                // otherwise finds from a previously visited page would linger forever.
+                viewModel.setItems(emptyList())
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
@@ -206,11 +209,15 @@ class MainActivity : AppCompatActivity() {
 
     private fun fetchContentLength(url: String): Long? {
         return try {
-            val headRequest = Request.Builder().url(url).head().build()
+            val headRequest = Request.Builder().url(url).header("User-Agent", USER_AGENT).head().build()
             httpClient.newCall(headRequest).execute().use { response ->
                 response.header("Content-Length")?.toLongOrNull()?.let { return it }
             }
-            val rangeRequest = Request.Builder().url(url).header("Range", "bytes=0-0").get().build()
+            val rangeRequest = Request.Builder().url(url)
+                .header("User-Agent", USER_AGENT)
+                .header("Range", "bytes=0-0")
+                .get()
+                .build()
             httpClient.newCall(rangeRequest).execute().use { response ->
                 val contentRange = response.header("Content-Range")
                 contentRange?.substringAfterLast('/')?.toLongOrNull()
@@ -250,7 +257,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadBitmapFromUrl(url: String): Bitmap? {
-        val request = Request.Builder().url(url).build()
+        val request = Request.Builder().url(url).header("User-Agent", USER_AGENT).build()
         httpClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) return null
             val bytes = response.body?.bytes() ?: return null
@@ -261,7 +268,7 @@ class MainActivity : AppCompatActivity() {
     private fun extractVideoFrame(url: String): Bitmap? {
         val retriever = MediaMetadataRetriever()
         return try {
-            retriever.setDataSource(url, HashMap<String, String>())
+            retriever.setDataSource(url, hashMapOf("User-Agent" to USER_AGENT))
             retriever.getFrameAtTime(1_000_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                 ?: retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
         } catch (e: Exception) {
@@ -273,5 +280,12 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val MEDIA_LIST_TAG = "media_list"
+
+        // Some CDNs reject requests without a browser-like User-Agent (OkHttp's and
+        // MediaMetadataRetriever's defaults are easy to fingerprint and block). Used for
+        // size lookups, poster/GIF thumbnail fetches, and video frame extraction.
+        private const val USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/124.0.0.0 Mobile Safari/537.36"
     }
 }
