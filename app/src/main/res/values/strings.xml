@@ -8,7 +8,6 @@
     <string name="action_scan">Medien auf dieser Seite suchen</string>
 
     <string name="no_media_found">Keine Videos oder GIFs auf dieser Seite gefunden</string>
-    <string name="no_new_media_found">Keine weiteren Medien gefunden</string>
     <string name="scan_failed">Seite konnte nicht durchsucht werden</string>
 
     <string name="media_list_title">Gefundene Medien</string>

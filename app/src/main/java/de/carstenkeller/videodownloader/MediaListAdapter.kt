@@ -45,9 +45,16 @@ class MediaListAdapter(
         }
 
         b.fileName.text = item.fileName
-        val kindLabel = if (item.kind == MediaKind.GIF) "GIF" else "Video"
+        // looksLikeGif: a <video loop muted> that behaves like a GIF but is a real video file
+        // (e.g. saved as .mp4) - labeled "GIF" here to match how it looks, without changing
+        // what's actually saved.
+        val kindLabel = if (item.kind == MediaKind.GIF || item.looksLikeGif) "GIF" else "Video"
         val sizeLabel = item.sizeBytes?.let { formatFileSize(it) } ?: context.getString(R.string.size_unknown)
-        b.subtitle.text = "$kindLabel · $sizeLabel"
+        var subtitle = "$kindLabel · $sizeLabel"
+        if (item.thumbnail == null && item.thumbnailError != null) {
+            subtitle += "\n⚠ Thumbnail: ${item.thumbnailError}"
+        }
+        b.subtitle.text = subtitle
 
         when (item.status) {
             DownloadStatus.IDLE -> {

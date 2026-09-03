@@ -198,7 +198,8 @@ class MainActivity : AppCompatActivity() {
                 kind = media.kind,
                 fileName = fileNames[index],
                 posterUrl = media.posterUrl,
-                sourcePageUrl = currentPageUrl
+                sourcePageUrl = currentPageUrl,
+                looksLikeGif = media.looksLikeGif
             )
         }
 
@@ -225,13 +226,18 @@ class MainActivity : AppCompatActivity() {
      * that only creates elements once truly on-screen still only reveals as much as this
      * step/time budget covers, and a genuinely infinite-scroll feed has no real bottom -
      * the step cap is what stops this from running forever on one.
+     *
+     * Always starts from an empty list: pressing the scan button rebuilds the results for
+     * whatever page is currently loaded, rather than adding to whatever an earlier page (or
+     * an earlier scan) had found. Matching same-host navigations (e.g. a same-site search
+     * that doesn't change the WebView's host) would otherwise keep stale entries around.
      */
     private fun scanCurrentPage() {
         // Immediate feedback on tap, independent of how long this takes - so it reads as
         // "working" rather than as the button doing nothing.
         binding.btnScan.isEnabled = false
+        viewModel.setItems(emptyList())
         lifecycleScope.launch {
-            val foundBefore = viewModel.items.value.size
             var totalNew = scanAndMergeOnce()
 
             var lastHeight = -1.0
@@ -254,8 +260,7 @@ class MainActivity : AppCompatActivity() {
 
             binding.btnScan.isEnabled = true
             if (totalNew == 0) {
-                val messageRes = if (foundBefore == 0) R.string.no_media_found else R.string.no_new_media_found
-                Toast.makeText(this@MainActivity, messageRes, Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity, R.string.no_media_found, Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -303,18 +308,24 @@ class MainActivity : AppCompatActivity() {
     private fun fetchThumbnails(items: List<MediaItem>) {
         items.forEach { item ->
             lifecycleScope.launch(Dispatchers.IO) {
-                val bitmap = try {
-                    when {
+                var bitmap: Bitmap? = null
+                // Captured and shown in the list (see MediaListAdapter) instead of just being
+                // dropped: after several rounds of guessing at header/decoder fixes that
+                // didn't hold up on all sites, seeing the actual failure reason per item is
+                // what's needed to diagnose the remaining cases instead of guessing again.
+                var error: String? = null
+                try {
+                    bitmap = when {
                         item.kind == MediaKind.GIF -> loadBitmapFromUrl(item.url, item.sourcePageUrl)
                         item.posterUrl != null -> loadBitmapFromUrl(item.posterUrl, item.sourcePageUrl)
                         else -> extractVideoFrame(item.url, item.sourcePageUrl)
                     }
                 } catch (e: Exception) {
-                    null
+                    error = e.message ?: e.javaClass.simpleName
                 }
-                if (bitmap != null) {
-                    withContext(Dispatchers.Main) {
-                        viewModel.updateItem(item.id) { it.copy(thumbnail = bitmap) }
+                withContext(Dispatchers.Main) {
+                    viewModel.updateItem(item.id) {
+                        it.copy(thumbnail = bitmap, thumbnailError = if (bitmap == null) error else null)
                     }
                 }
             }
@@ -328,13 +339,13 @@ class MainActivity : AppCompatActivity() {
         return builder
     }
 
-    private fun loadBitmapFromUrl(url: String, referer: String?): Bitmap? {
+    private fun loadBitmapFromUrl(url: String, referer: String?): Bitmap {
         val builder = withCommonHeaders(Request.Builder().url(url), url)
         if (referer != null) builder.header("Referer", referer)
         httpClient.newCall(builder.build()).execute().use { response ->
-            if (!response.isSuccessful) return null
-            val bytes = response.body?.bytes() ?: return null
-            return decodeBitmap(bytes)
+            if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code}")
+            val bytes = response.body?.bytes() ?: throw java.io.IOException("Leere Antwort")
+            return decodeBitmap(bytes) ?: throw java.io.IOException("Nicht dekodierbar (${bytes.size} Bytes)")
         }
     }
 
@@ -355,17 +366,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun extractVideoFrame(url: String, referer: String?): Bitmap? {
+    private fun extractVideoFrame(url: String, referer: String?): Bitmap {
         val retriever = MediaMetadataRetriever()
-        return try {
+        try {
             val headers = mutableMapOf("User-Agent" to NetworkHeaders.USER_AGENT)
             if (referer != null) headers["Referer"] = referer
             NetworkHeaders.cookiesFor(url)?.let { headers["Cookie"] = it }
             retriever.setDataSource(url, headers)
-            retriever.getFrameAtTime(1_000_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            return retriever.getFrameAtTime(1_000_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                 ?: retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-        } catch (e: Exception) {
-            null
+                ?: throw IllegalStateException("Kein Frame extrahierbar")
         } finally {
             retriever.release()
         }

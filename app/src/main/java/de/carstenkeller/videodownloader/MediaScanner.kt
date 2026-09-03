@@ -4,7 +4,15 @@ import android.net.Uri
 import org.json.JSONArray
 import org.json.JSONTokener
 
-data class ScannedMedia(val url: String, val kind: MediaKind, val posterUrl: String? = null)
+data class ScannedMedia(
+    val url: String,
+    val kind: MediaKind,
+    val posterUrl: String? = null,
+    // True for a <video> that behaves like a "GIF" (loop + muted, the common pattern sites
+    // use to serve GIF-style content as a much smaller video file). Display-only signal -
+    // the file itself is still a real video and is saved as one.
+    val looksLikeGif: Boolean = false
+)
 
 /**
  * Finds <video>/<source> elements, .gif <img> tags and direct links to video/gif files
@@ -24,13 +32,13 @@ object MediaScanner {
             if (!url) return null;
             try { return new URL(url, doc.baseURI).href; } catch (e) { return null; }
           }
-          function add(src, kind, poster, doc) {
+          function add(src, kind, poster, doc, looksLikeGif) {
             var abs = absolutize(src, doc);
             if (!abs) return;
             if (abs.indexOf('blob:') === 0 || abs.indexOf('data:') === 0) return;
             if (seen[abs]) return;
             seen[abs] = true;
-            urls.push({ url: abs, kind: kind, poster: absolutize(poster, doc) });
+            urls.push({ url: abs, kind: kind, poster: absolutize(poster, doc), looksLikeGif: !!looksLikeGif });
           }
           var videoExt = /\.(mp4|webm|mov|m4v|mkv|3gp|avi)(\?|#|${'$'})/i;
           var gifExt = /\.gif(\?|#|${'$'})/i;
@@ -48,9 +56,10 @@ object MediaScanner {
             try {
               doc.querySelectorAll('video').forEach(function(v) {
                 var poster = v.getAttribute('poster');
-                candidateSrcs(v).forEach(function(src) { add(src, 'video', poster, doc); });
+                var gifLike = v.hasAttribute('loop') && (v.muted || v.hasAttribute('muted'));
+                candidateSrcs(v).forEach(function(src) { add(src, 'video', poster, doc, gifLike); });
                 v.querySelectorAll('source').forEach(function(s) {
-                  candidateSrcs(s).forEach(function(src) { add(src, 'video', poster, doc); });
+                  candidateSrcs(s).forEach(function(src) { add(src, 'video', poster, doc, gifLike); });
                 });
               });
               doc.querySelectorAll('img').forEach(function(img) {
@@ -100,7 +109,8 @@ object MediaScanner {
             val url = obj.optString("url").takeIf { it.isNotBlank() } ?: continue
             val kind = if (obj.optString("kind") == "gif") MediaKind.GIF else MediaKind.VIDEO
             val poster = obj.optString("poster").takeIf { it.isNotBlank() && it != "null" }
-            result.add(ScannedMedia(url, kind, poster))
+            val looksLikeGif = obj.optBoolean("looksLikeGif", false)
+            result.add(ScannedMedia(url, kind, poster, looksLikeGif))
         }
         return result
     }
