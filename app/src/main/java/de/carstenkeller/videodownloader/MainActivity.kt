@@ -14,8 +14,8 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.addCallback
+import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
-import androidx.fragment.app.viewModels
 import androidx.lifecycle.lifecycleScope
 import de.carstenkeller.videodownloader.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
