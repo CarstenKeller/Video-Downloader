@@ -842,6 +842,10 @@ class MainActivity : AppCompatActivity() {
                 // didn't hold up on all sites, seeing the actual failure reason per item is
                 // what's needed to diagnose the remaining cases instead of guessing again.
                 var error: String? = null
+                // Extra diagnostic appended to thumbnailDebug - currently only the video
+                // branch's codec MIME type (see extractVideoCodecMime), to tell apart "this
+                // device's decoder can't handle this codec at all" from a narrower bug.
+                var debugSuffix: String? = null
                 try {
                     when {
                         item.streamPlan != null -> bitmap = extractStreamThumbnail(item.streamPlan, item.sourcePageUrl)
@@ -859,6 +863,7 @@ class MainActivity : AppCompatActivity() {
                             durationAttempted = true
                             val frame = extractVideoFrame(item.url, item.sourcePageUrl)
                             durationMs = frame.durationMs
+                            debugSuffix = frame.codecMime?.let { " mime=$it" }
                             bitmap = item.posterUrl?.let { poster ->
                                 try {
                                     loadBitmapFromUrl(poster, item.sourcePageUrl)
@@ -876,7 +881,7 @@ class MainActivity : AppCompatActivity() {
                         it.copy(
                             thumbnail = bitmap,
                             thumbnailError = if (bitmap == null) error else null,
-                            thumbnailDebug = bitmap?.let { b -> "${b.width}x${b.height} ${b.config}" },
+                            thumbnailDebug = bitmap?.let { b -> "${b.width}x${b.height} ${b.config}${debugSuffix ?: ""}" },
                             durationMs = durationMs ?: it.durationMs,
                             durationUnknown = durationAttempted && durationMs == null && bitmap != null,
                             durationPending = false
@@ -1021,7 +1026,7 @@ class MainActivity : AppCompatActivity() {
      * cost of downloading the bytes twice for anything the user goes on to also download - an
      * acceptable trade for a working thumbnail on a typically-small preview clip.
      */
-    private data class VideoFrame(val bitmap: Bitmap, val durationMs: Long?)
+    private data class VideoFrame(val bitmap: Bitmap, val durationMs: Long?, val codecMime: String?)
 
     private fun extractVideoFrame(url: String, referer: String?): VideoFrame {
         val tempFile = File.createTempFile("thumb_", ".tmp", cacheDir)
@@ -1082,12 +1087,32 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 val finalBitmap = bitmap ?: throw IllegalStateException("Kein Frame extrahierbar")
-                return VideoFrame(finalBitmap, durationMs)
+                val codecMime = extractVideoCodecMime(tempFile.absolutePath)
+                return VideoFrame(finalBitmap, durationMs, codecMime)
             } finally {
                 retriever.release()
             }
         } finally {
             tempFile.delete()
+        }
+    }
+
+    /** The video track's codec MIME type (e.g. "video/avc", "video/av01") - a diagnostic for
+     * telling apart "this device's decoder can't handle this codec at all" (every extraction
+     * strategy hitting the same 1x1 stub regardless of retrieval method) from a narrower bug. */
+    private fun extractVideoCodecMime(path: String): String? {
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(path)
+            for (i in 0 until extractor.trackCount) {
+                val mime = extractor.getTrackFormat(i).getString(MediaFormat.KEY_MIME)
+                if (mime?.startsWith("video/") == true) return mime
+            }
+            null
+        } catch (e: Exception) {
+            null
+        } finally {
+            extractor.release()
         }
     }
 
