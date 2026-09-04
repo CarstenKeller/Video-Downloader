@@ -866,7 +866,8 @@ class MainActivity : AppCompatActivity() {
                             durationAttempted = true
                             val frame = extractVideoFrame(item.url, item.sourcePageUrl)
                             durationMs = frame.durationMs
-                            debugSuffix = frame.codecMime?.let { " mime=$it" }
+                            debugSuffix = (frame.codecMime?.let { " mime=$it" } ?: "") +
+                                (frame.codecFallbackFailure?.let { " codecFallback=$it" } ?: "")
                             bitmap = item.posterUrl?.let { poster ->
                                 try {
                                     loadBitmapFromUrl(poster, item.sourcePageUrl)
@@ -1040,10 +1041,17 @@ class MainActivity : AppCompatActivity() {
      * YUV_420_888 image data we convert ourselves (yuvImageToBitmap) instead of a Bitmap it
      * produces internally - a fundamentally different code path than anything tried before.
      */
-    private fun captureFrameViaMediaCodec(path: String, timeUs: Long): Bitmap? {
+    /** Bitmap on success; on failure, a specific reason - since the caller (extractVideoFrame)
+     * only reaches this after every MediaMetadataRetriever strategy already failed, knowing
+     * exactly where THIS path failed too is the only remaining way to tell "opaque image format
+     * on this device" from "no output ever arrived" from "getOutputImage returned null despite
+     * a real buffer" apart, instead of guessing at yet another workaround. */
+    private data class CodecFrameResult(val bitmap: Bitmap?, val failureReason: String?)
+
+    private fun captureFrameViaMediaCodec(path: String, timeUs: Long): CodecFrameResult {
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
-        return try {
+        try {
             extractor.setDataSource(path)
             var trackIndex = -1
             var format: MediaFormat? = null
@@ -1055,12 +1063,13 @@ class MainActivity : AppCompatActivity() {
                     break
                 }
             }
-            val videoFormat = format ?: return null
-            if (trackIndex < 0) return null
+            val videoFormat = format ?: return CodecFrameResult(null, "keine Video-Spur gefunden")
+            if (trackIndex < 0) return CodecFrameResult(null, "keine Video-Spur gefunden")
             extractor.selectTrack(trackIndex)
             extractor.seekTo(timeUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
 
-            val mime = videoFormat.getString(MediaFormat.KEY_MIME) ?: return null
+            val mime = videoFormat.getString(MediaFormat.KEY_MIME)
+                ?: return CodecFrameResult(null, "kein MIME-Typ")
             codec = MediaCodec.createDecoderByType(mime)
             codec.configure(videoFormat, null, null, 0)
             codec.start()
@@ -1069,6 +1078,9 @@ class MainActivity : AppCompatActivity() {
             var result: Bitmap? = null
             var sawInputEos = false
             var attempts = 0
+            var outputsSeen = 0
+            var nullImageCount = 0
+            var conversionFailures = 0
             while (result == null && attempts < 200) {
                 attempts++
                 if (!sawInputEos) {
@@ -1089,19 +1101,30 @@ class MainActivity : AppCompatActivity() {
                 val outIndex = codec.dequeueOutputBuffer(bufferInfo, 10_000)
                 if (outIndex >= 0) {
                     if (bufferInfo.size > 0) {
+                        outputsSeen++
                         val image = codec.getOutputImage(outIndex)
                         if (image != null) {
                             result = yuvImageToBitmap(image)
+                            if (result == null) conversionFailures++
                             image.close()
+                        } else {
+                            nullImageCount++
                         }
                     }
                     codec.releaseOutputBuffer(outIndex, false)
                     if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break
                 }
             }
-            result
+            if (result != null) return CodecFrameResult(result, null)
+            val reason = when {
+                outputsSeen == 0 -> "kein Output-Buffer nach $attempts Versuchen (EOS=$sawInputEos)"
+                nullImageCount > 0 -> "getOutputImage()=null bei $nullImageCount/$outputsSeen Buffern - Bild-Format nicht auslesbar"
+                conversionFailures > 0 -> "YUV-Konvertierung fehlgeschlagen bei $conversionFailures/$outputsSeen Buffern"
+                else -> "unbekannt ($outputsSeen Outputs, kein Bild)"
+            }
+            return CodecFrameResult(null, reason)
         } catch (e: Exception) {
-            null
+            return CodecFrameResult(null, "Exception: ${e.message ?: e.javaClass.simpleName}")
         } finally {
             try {
                 codec?.stop()
@@ -1160,7 +1183,12 @@ class MainActivity : AppCompatActivity() {
      * cost of downloading the bytes twice for anything the user goes on to also download - an
      * acceptable trade for a working thumbnail on a typically-small preview clip.
      */
-    private data class VideoFrame(val bitmap: Bitmap, val durationMs: Long?, val codecMime: String?)
+    private data class VideoFrame(
+        val bitmap: Bitmap,
+        val durationMs: Long?,
+        val codecMime: String?,
+        val codecFallbackFailure: String? = null
+    )
 
     private fun extractVideoFrame(url: String, referer: String?): VideoFrame {
         val tempFile = File.createTempFile("thumb_", ".tmp", cacheDir)
@@ -1241,14 +1269,19 @@ class MainActivity : AppCompatActivity() {
                 // fix rounds this went through) points to a MediaMetadataRetriever limitation on
                 // this device/content, not a fixable seek/config parameter. Decode a frame
                 // directly instead, bypassing it entirely.
+                var codecFallbackFailure: String? = null
                 if (bitmap == null || isLikelyBlankFrame(bitmap)) {
-                    captureFrameViaMediaCodec(tempFile.absolutePath, candidateTimestampsUs.first())?.let {
-                        if (!isLikelyBlankFrame(it)) bitmap = it
+                    val codecResult = captureFrameViaMediaCodec(tempFile.absolutePath, candidateTimestampsUs.first())
+                    val codecBitmap = codecResult.bitmap
+                    if (codecBitmap != null && !isLikelyBlankFrame(codecBitmap)) {
+                        bitmap = codecBitmap
+                    } else {
+                        codecFallbackFailure = codecResult.failureReason ?: "lieferte ebenfalls einen leeren Frame"
                     }
                 }
                 val finalBitmap = bitmap ?: throw IllegalStateException("Kein Frame extrahierbar")
                 val codecMime = extractVideoCodecMime(tempFile.absolutePath)
-                return VideoFrame(finalBitmap, durationMs, codecMime)
+                return VideoFrame(finalBitmap, durationMs, codecMime, codecFallbackFailure)
             } finally {
                 retriever.release()
             }
