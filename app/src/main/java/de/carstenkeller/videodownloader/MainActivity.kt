@@ -249,7 +249,9 @@ class MainActivity : AppCompatActivity() {
                 posterUrl = media.posterUrl,
                 sourcePageUrl = currentPageUrl,
                 looksLikeGif = media.looksLikeGif,
-                durationPending = media.posterUrl == null
+                // Duration is now always attempted for both real kinds (GIF, VIDEO) - see
+                // fetchThumbnails - a poster attribute no longer skips it.
+                durationPending = true
             )
         }
 
@@ -339,7 +341,7 @@ class MainActivity : AppCompatActivity() {
                         crawlStatus = null,
                         durationMs = null,
                         durationUnknown = false,
-                        durationPending = match.posterUrl == null
+                        durationPending = true
                     )
                 }
                 val updated = viewModel.items.value.find { it.id == item.id } ?: return@launch
@@ -533,7 +535,7 @@ class MainActivity : AppCompatActivity() {
                     posterUrl = media.posterUrl,
                     sourcePageUrl = link,
                     looksLikeGif = media.looksLikeGif,
-                    durationPending = media.posterUrl == null
+                    durationPending = true
                 )
             }
             viewModel.setItems(existing + newItems)
@@ -813,11 +815,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Thumbnails: GIFs use the file itself. Videos use the page's declared <video poster>
-     * if present (free - no extra download); otherwise a real frame is extracted directly
-     * from the video file via MediaMetadataRetriever, which streams only as much of the
-     * remote file as it needs - not the whole thing, but still real network/data usage per
-     * video, unlike the poster case.
+     * Thumbnails: GIFs use the file itself. Videos always download and read the actual video
+     * file via MediaMetadataRetriever - a real bug found from testing: skipping that whenever
+     * the page happened to declare a <video poster> (using the poster image alone instead)
+     * left duration permanently unmeasured for any such item, since a poster is just a static
+     * image with no length of its own - silently defeating the minimum-length filter for every
+     * poster-having video regardless of the slider. The poster is still used as the *shown*
+     * thumbnail when it's actually fetchable (typically a lighter, curated preview than
+     * whatever timestamp the video extraction lands on), falling back to the extracted frame
+     * otherwise - but duration now always comes from the real file.
      */
     private fun fetchThumbnails(items: List<MediaItem>) {
         items.forEach { item ->
@@ -825,8 +831,9 @@ class MainActivity : AppCompatActivity() {
                 var bitmap: Bitmap? = null
                 var durationMs: Long? = null
                 // Only set for the two branches below that actually attempt to measure a
-                // duration - a poster-based thumbnail or a still-pending stream never did, so
-                // their durationMs being null isn't a failure worth flagging.
+                // duration - a stream (its length lives in the manifest, not a downloadable
+                // frame) never does, so its durationMs being null isn't a failure worth
+                // flagging.
                 var durationAttempted = false
                 // Captured and shown in the list (see MediaListAdapter) instead of just being
                 // dropped: after several rounds of guessing at header/decoder fixes that
@@ -842,12 +849,21 @@ class MainActivity : AppCompatActivity() {
                             bitmap = decodeBitmap(bytes) ?: throw java.io.IOException("Nicht dekodierbar (${bytes.size} Bytes)")
                             durationMs = GifDuration.parseMs(bytes)
                         }
-                        item.posterUrl != null -> bitmap = loadBitmapFromUrl(item.posterUrl, item.sourcePageUrl)
                         else -> {
+                            // Duration can only come from the real file - always read it here,
+                            // poster or not (see the fetchThumbnails doc comment above). The
+                            // poster, when present and actually fetchable, is preferred only
+                            // for the *displayed* thumbnail image.
                             durationAttempted = true
                             val frame = extractVideoFrame(item.url, item.sourcePageUrl)
-                            bitmap = frame.bitmap
                             durationMs = frame.durationMs
+                            bitmap = item.posterUrl?.let { poster ->
+                                try {
+                                    loadBitmapFromUrl(poster, item.sourcePageUrl)
+                                } catch (e: Exception) {
+                                    null
+                                }
+                            } ?: frame.bitmap
                         }
                     }
                 } catch (e: Exception) {

@@ -14,8 +14,9 @@ class MediaListViewModel : ViewModel() {
     val downloading: StateFlow<Boolean> = _downloading.asStateFlow()
 
     // 0 = off. Only affects items with a known durationMs (see isVisibleForMinDuration) - a
-    // real .gif image or anything whose duration couldn't be measured has nothing to judge
-    // against, so it's never hidden by this.
+    // stream (whose length lives in its manifest, never extracted here) or anything whose
+    // duration extraction genuinely couldn't determine one has nothing to judge against, so
+    // it's never hidden by this; an item still awaiting extraction is hidden until it settles.
     private val _minDurationSeconds = MutableStateFlow(0)
     val minDurationSeconds: StateFlow<Int> = _minDurationSeconds.asStateFlow()
 
