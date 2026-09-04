@@ -5,6 +5,8 @@ import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Bundle
@@ -334,7 +336,8 @@ class MainActivity : AppCompatActivity() {
                         thumbnail = null,
                         thumbnailError = null,
                         crawlStatus = null,
-                        durationMs = null
+                        durationMs = null,
+                        durationUnknown = false
                     )
                 }
                 val updated = viewModel.items.value.find { it.id == item.id } ?: return@launch
@@ -818,6 +821,10 @@ class MainActivity : AppCompatActivity() {
             lifecycleScope.launch(Dispatchers.IO) {
                 var bitmap: Bitmap? = null
                 var durationMs: Long? = null
+                // Only set for the two branches below that actually attempt to measure a
+                // duration - a poster-based thumbnail or a still-pending stream never did, so
+                // their durationMs being null isn't a failure worth flagging.
+                var durationAttempted = false
                 // Captured and shown in the list (see MediaListAdapter) instead of just being
                 // dropped: after several rounds of guessing at header/decoder fixes that
                 // didn't hold up on all sites, seeing the actual failure reason per item is
@@ -827,12 +834,14 @@ class MainActivity : AppCompatActivity() {
                     when {
                         item.streamPlan != null -> bitmap = extractStreamThumbnail(item.streamPlan, item.sourcePageUrl)
                         item.kind == MediaKind.GIF -> {
+                            durationAttempted = true
                             val bytes = downloadCapped(item.url, item.sourcePageUrl, MAX_THUMBNAIL_DOWNLOAD_BYTES)
                             bitmap = decodeBitmap(bytes) ?: throw java.io.IOException("Nicht dekodierbar (${bytes.size} Bytes)")
                             durationMs = GifDuration.parseMs(bytes)
                         }
                         item.posterUrl != null -> bitmap = loadBitmapFromUrl(item.posterUrl, item.sourcePageUrl)
                         else -> {
+                            durationAttempted = true
                             val frame = extractVideoFrame(item.url, item.sourcePageUrl)
                             bitmap = frame.bitmap
                             durationMs = frame.durationMs
@@ -846,7 +855,8 @@ class MainActivity : AppCompatActivity() {
                         it.copy(
                             thumbnail = bitmap,
                             thumbnailError = if (bitmap == null) error else null,
-                            durationMs = durationMs ?: it.durationMs
+                            durationMs = durationMs ?: it.durationMs,
+                            durationUnknown = durationAttempted && durationMs == null && bitmap != null
                         )
                     }
                 }
@@ -933,8 +943,15 @@ class MainActivity : AppCompatActivity() {
                 // to land on an actual content frame than a fixed early timestamp would for a
                 // short looping clip. Also fed into the item's durationMs, driving the
                 // minimum-length filter in the list.
+                // Some of the short preview clips this app deals with (e.g. re-encoded search-
+                // result snippets) don't carry the top-level duration metadata this reads - the
+                // container is otherwise fine (a frame decodes without issue) but this key comes
+                // back null. Falling back to the video track's own format duration (a different
+                // read path - MediaExtractor's demuxer, not the metadata table) recovers it for
+                // exactly that case instead of silently leaving the item unfiltered by length.
                 val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
                     ?.toLongOrNull()
+                    ?: extractDurationViaTrackFormat(tempFile.absolutePath)
                 val targetUs = if (durationMs != null && durationMs > 0) (durationMs * 1000L) / 3 else 300_000L
 
                 val bitmap = retriever.getFrameAtTime(targetUs, MediaMetadataRetriever.OPTION_CLOSEST)
@@ -946,6 +963,28 @@ class MainActivity : AppCompatActivity() {
             }
         } finally {
             tempFile.delete()
+        }
+    }
+
+    /** Longest track duration reported by the container's own format, in ms - a fallback for
+     * clips whose top-level duration metadata (see [extractVideoFrame]) is missing. */
+    private fun extractDurationViaTrackFormat(path: String): Long? {
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(path)
+            var longestMs: Long? = null
+            for (i in 0 until extractor.trackCount) {
+                val format = extractor.getTrackFormat(i)
+                if (format.containsKey(MediaFormat.KEY_DURATION)) {
+                    val ms = format.getLong(MediaFormat.KEY_DURATION) / 1000
+                    if (longestMs == null || ms > longestMs) longestMs = ms
+                }
+            }
+            longestMs
+        } catch (e: Exception) {
+            null
+        } finally {
+            extractor.release()
         }
     }
 

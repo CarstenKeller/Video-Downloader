@@ -61,6 +61,12 @@ class MediaListAdapter(
         if (item.thumbnail == null && item.thumbnailError != null) {
             subtitle += "\n⚠ Thumbnail: ${item.thumbnailError}"
         }
+        // See MediaItem.durationUnknown - without this, an item the length filter couldn't
+        // judge just silently shows up regardless of the slider, which looks like the filter
+        // doesn't work at all rather than like a specific, unmeasurable file.
+        if (item.durationUnknown) {
+            subtitle += "\nℹ Länge nicht ermittelbar - wird vom Mindestlängen-Filter nicht ausgeblendet"
+        }
         // Debug-style diagnostic for the source-page crawl - see MainActivity.
         // upgradeFromSourceLinks - shown so real behavior can be read off the device.
         item.crawlStatus?.let { subtitle += "\nℹ $it" }

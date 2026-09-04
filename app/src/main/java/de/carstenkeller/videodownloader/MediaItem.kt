@@ -31,6 +31,13 @@ data class MediaItem(
     // not necessarily "zero length". Drives the minimum-length filter in the list; items with
     // an unknown duration are never hidden by it, since there is nothing to judge them against.
     val durationMs: Long? = null,
+    // True when a duration-capable extraction (a real .gif's frame delays, or a video's own
+    // metadata/track-format duration) actually ran and still came back empty - as opposed to
+    // durationMs simply being null because no such extraction applies to this item at all (a
+    // poster-based thumbnail, a still-pending fetch) or hasn't run yet. Surfaced in the list so
+    // it's visible *why* the minimum-length filter didn't hide an item, instead of it looking
+    // like the filter silently does nothing.
+    val durationUnknown: Boolean = false,
     // Diagnostic text for the source-page crawl (see MainActivity.upgradeFromSourceLinks),
     // shown in the list so real crawl behavior can be read off the device instead of guessed
     // at - previous guesses about *why* a crawl didn't improve an item have repeatedly not
