@@ -929,6 +929,29 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * Cheap heuristic for "this decoded frame carries no real information" - samples a 3x3 grid
+     * of pixels and checks whether they're all within a small tolerance of each other (a solid
+     * or near-solid color). Real video content almost never passes this at 9 spread-out points;
+     * a blank/black/white placeholder frame reliably does.
+     */
+    private fun isLikelyBlankFrame(bitmap: Bitmap): Boolean {
+        val width = bitmap.width
+        val height = bitmap.height
+        if (width <= 1 || height <= 1) return true
+        val fractions = listOf(0.1f, 0.5f, 0.9f)
+        val samples = fractions.flatMap { fx -> fractions.map { fy -> fx to fy } }.map { (fx, fy) ->
+            bitmap.getPixel((fx * (width - 1)).toInt(), (fy * (height - 1)).toInt())
+        }
+        val reference = samples.first()
+        val tolerance = 12
+        return samples.all { pixel ->
+            kotlin.math.abs(android.graphics.Color.red(pixel) - android.graphics.Color.red(reference)) <= tolerance &&
+                kotlin.math.abs(android.graphics.Color.green(pixel) - android.graphics.Color.green(reference)) <= tolerance &&
+                kotlin.math.abs(android.graphics.Color.blue(pixel) - android.graphics.Color.blue(reference)) <= tolerance
+        }
+    }
+
+    /**
      * Downloads the video to a temp file (capped at [MAX_THUMBNAIL_DOWNLOAD_BYTES]) and
      * extracts the frame from that local file, instead of pointing MediaMetadataRetriever at
      * the network URL directly. Reported symptom that led here: the downloaded file itself
@@ -974,10 +997,28 @@ class MainActivity : AppCompatActivity() {
                     ?: extractDurationViaTrackFormat(tempFile.absolutePath)
                 val targetUs = if (durationMs != null && durationMs > 0) (durationMs * 1000L) / 3 else 300_000L
 
-                val bitmap = retriever.getFrameAtTime(targetUs, MediaMetadataRetriever.OPTION_CLOSEST)
-                    ?: retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST)
-                    ?: throw IllegalStateException("Kein Frame extrahierbar")
-                return VideoFrame(bitmap, durationMs)
+                // MediaMetadataRetriever can "succeed" with a technically valid but visually
+                // blank/flat-colored bitmap for a given timestamp (the exact failure mode that
+                // originally led to reading from a local file at all, above) - so rather than
+                // trust the first non-null frame, try a few candidate timestamps and keep the
+                // first one that actually looks like real content, falling back to whichever
+                // decoded frame was found if every candidate looks blank.
+                val candidateTimestampsUs = listOfNotNull(
+                    targetUs,
+                    0L,
+                    if (durationMs != null && durationMs > 0) (durationMs * 1000L * 2) / 3 else null
+                ).distinct()
+                var bitmap: Bitmap? = null
+                for (ts in candidateTimestampsUs) {
+                    val candidate = retriever.getFrameAtTime(ts, MediaMetadataRetriever.OPTION_CLOSEST) ?: continue
+                    if (bitmap == null) bitmap = candidate
+                    if (!isLikelyBlankFrame(candidate)) {
+                        bitmap = candidate
+                        break
+                    }
+                }
+                val finalBitmap = bitmap ?: throw IllegalStateException("Kein Frame extrahierbar")
+                return VideoFrame(finalBitmap, durationMs)
             } finally {
                 retriever.release()
             }
