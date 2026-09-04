@@ -10,6 +10,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import de.carstenkeller.videodownloader.databinding.FragmentMediaListBinding
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 
@@ -36,16 +37,34 @@ class MediaListBottomSheet : BottomSheetDialogFragment() {
         binding.recyclerView.layoutManager = LinearLayoutManager(requireContext())
         binding.recyclerView.adapter = adapter
 
-        binding.checkAll.setOnClickListener { viewModel.setAllSelected(true) }
-        binding.uncheckAll.setOnClickListener { viewModel.setAllSelected(false) }
+        binding.minDurationSlider.value = viewModel.minDurationSeconds.value.toFloat()
+        binding.minDurationSlider.addOnChangeListener { _, value, _ ->
+            viewModel.setMinDurationSeconds(value.toInt())
+        }
+
+        binding.checkAll.setOnClickListener {
+            viewModel.setAllSelected(true, visibleIds())
+        }
+        binding.uncheckAll.setOnClickListener {
+            viewModel.setAllSelected(false, visibleIds())
+        }
         binding.btnDownload.setOnClickListener { startDownload() }
 
         viewLifecycleOwner.lifecycleScope.launch {
-            viewModel.items.collect { items ->
-                adapter.submitList(items)
-                binding.emptyLabel.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
-                binding.recyclerView.visibility = if (items.isEmpty()) View.GONE else View.VISIBLE
-                val selectedCount = items.count { it.selected }
+            combine(viewModel.items, viewModel.minDurationSeconds) { items, minSeconds ->
+                items to minSeconds
+            }.collect { (items, minSeconds) ->
+                binding.minDurationLabel.text = if (minSeconds <= 0) {
+                    getString(R.string.min_duration_off)
+                } else {
+                    getString(R.string.min_duration_seconds, minSeconds)
+                }
+
+                val visible = items.filter { isVisibleForMinDuration(it, minSeconds) }
+                adapter.submitList(visible)
+                binding.emptyLabel.visibility = if (visible.isEmpty()) View.VISIBLE else View.GONE
+                binding.recyclerView.visibility = if (visible.isEmpty()) View.GONE else View.VISIBLE
+                val selectedCount = visible.count { it.selected }
                 binding.btnDownload.text = getString(R.string.download_count, selectedCount)
                 binding.btnDownload.isEnabled = selectedCount > 0 && !viewModel.downloading.value
             }
@@ -55,15 +74,28 @@ class MediaListBottomSheet : BottomSheetDialogFragment() {
             viewModel.downloading.collect { downloading ->
                 binding.checkAll.isEnabled = !downloading
                 binding.uncheckAll.isEnabled = !downloading
+                binding.minDurationSlider.isEnabled = !downloading
                 isCancelable = !downloading
-                val selectedCount = viewModel.items.value.count { it.selected }
+                val selectedCount = visibleSelected().size
                 binding.btnDownload.isEnabled = !downloading && selectedCount > 0
             }
         }
     }
 
+    /** Ids of items currently shown under the minimum-length filter - used to scope "select
+     * all"/"deselect all" and the actual download to what the user can actually see. */
+    private fun visibleIds(): Set<String> {
+        val minSeconds = viewModel.minDurationSeconds.value
+        return viewModel.items.value.filter { isVisibleForMinDuration(it, minSeconds) }.map { it.id }.toSet()
+    }
+
+    private fun visibleSelected(): List<MediaItem> {
+        val ids = visibleIds()
+        return viewModel.items.value.filter { it.selected && it.id in ids }
+    }
+
     private fun startDownload() {
-        val selected = viewModel.items.value.filter { it.selected }
+        val selected = visibleSelected()
         if (selected.isEmpty()) return
 
         viewModel.setDownloading(true)
@@ -89,7 +121,7 @@ class MediaListBottomSheet : BottomSheetDialogFragment() {
             )
             viewModel.setDownloading(false)
             val results = viewModel.items.value
-            val successCount = results.count { it.status == DownloadStatus.DONE }
+            val successCount = selected.count { sel -> results.any { it.id == sel.id && it.status == DownloadStatus.DONE } }
             Toast.makeText(
                 requireContext(),
                 getString(R.string.download_summary, successCount, selected.size),

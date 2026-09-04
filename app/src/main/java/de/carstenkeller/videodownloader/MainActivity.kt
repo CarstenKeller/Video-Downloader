@@ -313,7 +313,8 @@ class MainActivity : AppCompatActivity() {
                         sizeBytes = null,
                         thumbnail = null,
                         thumbnailError = null,
-                        crawlStatus = null
+                        crawlStatus = null,
+                        durationMs = null
                     )
                 }
                 val updated = viewModel.items.value.find { it.id == item.id } ?: return@launch
@@ -626,6 +627,8 @@ class MainActivity : AppCompatActivity() {
             if (supportFragmentManager.findFragmentByTag(MEDIA_LIST_TAG) == null) {
                 MediaListBottomSheet().show(supportFragmentManager, MEDIA_LIST_TAG)
             }
+            fetchSizes(listOf(item))
+            fetchThumbnails(listOf(item))
             1
         }
 
@@ -736,7 +739,8 @@ class MainActivity : AppCompatActivity() {
     private fun fetchSizes(items: List<MediaItem>) {
         items.forEach { item ->
             lifecycleScope.launch(Dispatchers.IO) {
-                val size = fetchContentLength(item.url)
+                val size = item.streamPlan?.let { estimateStreamSize(it, item.sourcePageUrl) }
+                    ?: fetchContentLength(item.url, item.sourcePageUrl)
                 if (size != null) {
                     withContext(Dispatchers.Main) {
                         viewModel.updateItem(item.id) { it.copy(sizeBytes = size) }
@@ -746,13 +750,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun fetchContentLength(url: String): Long? {
+    private fun fetchContentLength(url: String, referer: String? = null): Long? {
         return try {
-            val headRequest = withCommonHeaders(Request.Builder().url(url), url).head().build()
+            val headRequest = withCommonHeaders(Request.Builder().url(url), url)
+                .apply { referer?.let { header("Referer", it) } }
+                .head().build()
             httpClient.newCall(headRequest).execute().use { response ->
                 response.header("Content-Length")?.toLongOrNull()?.let { return it }
             }
             val rangeRequest = withCommonHeaders(Request.Builder().url(url), url)
+                .apply { referer?.let { header("Referer", it) } }
                 .header("Range", "bytes=0-0")
                 .get()
                 .build()
@@ -767,6 +774,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * Rough estimate only: HEADs/Range-requests just the first media segment and multiplies by
+     * the total segment count. Real per-segment sizes vary (especially with variable bitrate),
+     * so this is an approximation shown to give a sense of scale, not an exact figure - there
+     * is no cheap way to know a segmented stream's exact total size without fetching everything.
+     */
+    private fun estimateStreamSize(plan: StreamDownloadPlan, referer: String?): Long? {
+        val sampleUrl = plan.videoSegmentUrls.firstOrNull() ?: return null
+        val perSegmentBytes = fetchContentLength(sampleUrl, referer) ?: return null
+        val totalSegments = plan.videoSegmentUrls.size + if (plan.videoInitUrl != null) 1 else 0
+        return perSegmentBytes * totalSegments
+    }
+
+    /**
      * Thumbnails: GIFs use the file itself. Videos use the page's declared <video poster>
      * if present (free - no extra download); otherwise a real frame is extracted directly
      * from the video file via MediaMetadataRetriever, which streams only as much of the
@@ -777,23 +797,33 @@ class MainActivity : AppCompatActivity() {
         items.forEach { item ->
             lifecycleScope.launch(Dispatchers.IO) {
                 var bitmap: Bitmap? = null
+                var durationMs: Long? = null
                 // Captured and shown in the list (see MediaListAdapter) instead of just being
                 // dropped: after several rounds of guessing at header/decoder fixes that
                 // didn't hold up on all sites, seeing the actual failure reason per item is
                 // what's needed to diagnose the remaining cases instead of guessing again.
                 var error: String? = null
                 try {
-                    bitmap = when {
-                        item.kind == MediaKind.GIF -> loadBitmapFromUrl(item.url, item.sourcePageUrl)
-                        item.posterUrl != null -> loadBitmapFromUrl(item.posterUrl, item.sourcePageUrl)
-                        else -> extractVideoFrame(item.url, item.sourcePageUrl)
+                    when {
+                        item.streamPlan != null -> bitmap = extractStreamThumbnail(item.streamPlan, item.sourcePageUrl)
+                        item.kind == MediaKind.GIF -> bitmap = loadBitmapFromUrl(item.url, item.sourcePageUrl)
+                        item.posterUrl != null -> bitmap = loadBitmapFromUrl(item.posterUrl, item.sourcePageUrl)
+                        else -> {
+                            val frame = extractVideoFrame(item.url, item.sourcePageUrl)
+                            bitmap = frame.bitmap
+                            durationMs = frame.durationMs
+                        }
                     }
                 } catch (e: Exception) {
                     error = e.message ?: e.javaClass.simpleName
                 }
                 withContext(Dispatchers.Main) {
                     viewModel.updateItem(item.id) {
-                        it.copy(thumbnail = bitmap, thumbnailError = if (bitmap == null) error else null)
+                        it.copy(
+                            thumbnail = bitmap,
+                            thumbnailError = if (bitmap == null) error else null,
+                            durationMs = durationMs ?: it.durationMs
+                        )
                     }
                 }
             }
@@ -845,7 +875,9 @@ class MainActivity : AppCompatActivity() {
      * cost of downloading the bytes twice for anything the user goes on to also download - an
      * acceptable trade for a working thumbnail on a typically-small preview clip.
      */
-    private fun extractVideoFrame(url: String, referer: String?): Bitmap {
+    private data class VideoFrame(val bitmap: Bitmap, val durationMs: Long?)
+
+    private fun extractVideoFrame(url: String, referer: String?): VideoFrame {
         val tempFile = File.createTempFile("thumb_", ".tmp", cacheDir)
         try {
             val builder = withCommonHeaders(Request.Builder().url(url), url)
@@ -865,13 +897,50 @@ class MainActivity : AppCompatActivity() {
                 // Picking a point roughly a third into the clip's own duration, with
                 // OPTION_CLOSEST (exact decode, not just the nearest keyframe), is more likely
                 // to land on an actual content frame than a fixed early timestamp would for a
-                // short looping clip.
+                // short looping clip. Also fed into the item's durationMs, driving the
+                // minimum-length filter in the list.
                 val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
                     ?.toLongOrNull()
                 val targetUs = if (durationMs != null && durationMs > 0) (durationMs * 1000L) / 3 else 300_000L
 
-                return retriever.getFrameAtTime(targetUs, MediaMetadataRetriever.OPTION_CLOSEST)
+                val bitmap = retriever.getFrameAtTime(targetUs, MediaMetadataRetriever.OPTION_CLOSEST)
                     ?: retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST)
+                    ?: throw IllegalStateException("Kein Frame extrahierbar")
+                return VideoFrame(bitmap, durationMs)
+            } finally {
+                retriever.release()
+            }
+        } finally {
+            tempFile.delete()
+        }
+    }
+
+    /**
+     * Downloads just the init segment (if any) plus the first media segment - enough for most
+     * MPEG-TS/fMP4 streams to yield a readable first frame, without fetching the whole
+     * (potentially very long) stream just for a list thumbnail.
+     */
+    private fun extractStreamThumbnail(plan: StreamDownloadPlan, referer: String?): Bitmap {
+        val previewSegments = listOfNotNull(plan.videoInitUrl) + plan.videoSegmentUrls.take(1)
+        if (previewSegments.isEmpty()) throw IllegalStateException("Keine Segmente")
+
+        val tempFile = File.createTempFile("streamthumb_", ".tmp", cacheDir)
+        try {
+            tempFile.outputStream().use { out ->
+                previewSegments.forEach { segmentUrl ->
+                    val builder = withCommonHeaders(Request.Builder().url(segmentUrl), segmentUrl)
+                    if (referer != null) builder.header("Referer", referer)
+                    httpClient.newCall(builder.build()).execute().use { response ->
+                        if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code}")
+                        val body = response.body ?: throw java.io.IOException("Leere Antwort")
+                        copyLimited(body.byteStream(), out, MAX_THUMBNAIL_DOWNLOAD_BYTES)
+                    }
+                }
+            }
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(tempFile.absolutePath)
+                return retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST)
                     ?: throw IllegalStateException("Kein Frame extrahierbar")
             } finally {
                 retriever.release()

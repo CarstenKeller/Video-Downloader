@@ -49,6 +49,28 @@
     </LinearLayout>
 
     <TextView
+        android:id="@+id/minDurationLabel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="4dp"
+        android:text="@string/min_duration_off"
+        android:textColor="#666666"
+        android:textSize="12sp" />
+
+    <com.google.android.material.slider.Slider
+        android:id="@+id/minDurationSlider"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:layout_marginEnd="8dp"
+        android:stepSize="1"
+        android:value="0"
+        android:valueFrom="0"
+        android:valueTo="15" />
+
+    <TextView
         android:id="@+id/emptyLabel"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"

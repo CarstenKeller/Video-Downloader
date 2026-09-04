@@ -13,6 +13,16 @@ class MediaListViewModel : ViewModel() {
     private val _downloading = MutableStateFlow(false)
     val downloading: StateFlow<Boolean> = _downloading.asStateFlow()
 
+    // 0 = off. Only affects items with a known durationMs (see isVisibleForMinDuration) - a
+    // real .gif image or anything whose duration couldn't be measured has nothing to judge
+    // against, so it's never hidden by this.
+    private val _minDurationSeconds = MutableStateFlow(0)
+    val minDurationSeconds: StateFlow<Int> = _minDurationSeconds.asStateFlow()
+
+    fun setMinDurationSeconds(seconds: Int) {
+        _minDurationSeconds.value = seconds
+    }
+
     fun setItems(newItems: List<MediaItem>) {
         _items.value = newItems
     }
@@ -21,8 +31,16 @@ class MediaListViewModel : ViewModel() {
         _items.value = _items.value.map { if (it.id == id) it.copy(selected = !it.selected) else it }
     }
 
-    fun setAllSelected(selected: Boolean) {
-        _items.value = _items.value.map { if (it.status == DownloadStatus.IDLE) it.copy(selected = selected) else it }
+    /** [onlyIds], when given, restricts the change to those items (e.g. only the ones
+     * currently visible under the minimum-length filter) instead of the whole list. */
+    fun setAllSelected(selected: Boolean, onlyIds: Set<String>? = null) {
+        _items.value = _items.value.map {
+            if (it.status == DownloadStatus.IDLE && (onlyIds == null || it.id in onlyIds)) {
+                it.copy(selected = selected)
+            } else {
+                it
+            }
+        }
     }
 
     fun updateItem(id: String, transform: (MediaItem) -> MediaItem) {
@@ -32,4 +50,10 @@ class MediaListViewModel : ViewModel() {
     fun setDownloading(value: Boolean) {
         _downloading.value = value
     }
+}
+
+fun isVisibleForMinDuration(item: MediaItem, minDurationSeconds: Int): Boolean {
+    if (minDurationSeconds <= 0) return true
+    val durationMs = item.durationMs ?: return true
+    return durationMs >= minDurationSeconds * 1000L
 }

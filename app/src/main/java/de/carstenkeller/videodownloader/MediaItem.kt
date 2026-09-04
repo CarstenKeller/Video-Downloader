@@ -25,6 +25,12 @@ data class MediaItem(
     val errorMessage: String? = null,
     val thumbnail: Bitmap? = null,
     val thumbnailError: String? = null,
+    // Video duration, when cheaply available as a byproduct of thumbnail extraction (see
+    // MainActivity.extractVideoFrame) - null whenever it wasn't measured (a poster-based
+    // thumbnail never downloads the video itself, and real .gif images have no such concept),
+    // not necessarily "zero length". Drives the minimum-length filter in the list; items with
+    // an unknown duration are never hidden by it, since there is nothing to judge them against.
+    val durationMs: Long? = null,
     // Diagnostic text for the source-page crawl (see MainActivity.upgradeFromSourceLinks),
     // shown in the list so real crawl behavior can be read off the device instead of guessed
     // at - previous guesses about *why* a crawl didn't improve an item have repeatedly not

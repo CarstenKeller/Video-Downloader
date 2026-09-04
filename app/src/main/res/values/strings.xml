@@ -21,4 +21,6 @@
     <string name="status_error">Fehler</string>
     <string name="empty_list">Keine Medien gefunden</string>
     <string name="album_hint">Gespeichert in Fotos, Album „VideoDownloader“</string>
+    <string name="min_duration_off">Mindestlänge: aus (kurze Clips werden nicht ausgeblendet)</string>
+    <string name="min_duration_seconds">Mindestlänge: %1$d s (kürzere Videos ausgeblendet, unbekannte Länge bleibt sichtbar)</string>
 </resources>

@@ -51,8 +51,13 @@ class MediaListAdapter(
         // what's actually saved.
         val baseKindLabel = if (item.kind == MediaKind.GIF || item.looksLikeGif) "GIF" else "Video"
         val kindLabel = if (item.streamPlan != null || item.downloadDisabled) "$baseKindLabel (Stream)" else baseKindLabel
-        val sizeLabel = item.sizeBytes?.let { formatFileSize(it) } ?: context.getString(R.string.size_unknown)
+        // "~" for streams: an estimate from one sample segment's size times the segment count,
+        // not an exact figure - there is no cheap way to know a segmented stream's exact total
+        // size without downloading it in full.
+        val sizeLabel = item.sizeBytes?.let { (if (item.streamPlan != null) "~" else "") + formatFileSize(it) }
+            ?: context.getString(R.string.size_unknown)
         var subtitle = "$kindLabel · $sizeLabel"
+        item.durationMs?.let { subtitle += " · ${formatDuration(it)}" }
         if (item.thumbnail == null && item.thumbnailError != null) {
             subtitle += "\n⚠ Thumbnail: ${item.thumbnailError}"
         }

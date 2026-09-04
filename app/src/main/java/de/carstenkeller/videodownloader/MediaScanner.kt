@@ -226,3 +226,10 @@ fun formatFileSize(bytes: Long): String {
     val gb = mb / 1024.0
     return String.format("%.2f GB", gb)
 }
+
+fun formatDuration(durationMs: Long): String {
+    val totalSeconds = durationMs / 1000
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    return if (minutes > 0) "${minutes}:${seconds.toString().padStart(2, '0')} min" else "${seconds}s"
+}
