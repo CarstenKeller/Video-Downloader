@@ -276,6 +276,13 @@ class MainActivity : AppCompatActivity() {
      * blocks or delays the visible scan itself.
      */
     private fun upgradeFromSourceLinks(pairs: List<Pair<ScannedMedia, MediaItem>>, pageUrl: String?) {
+        // Several items can each resolve to the very same "upgraded" source URL - e.g. two
+        // click-simulation runs both landing on the same generic lightbox element because the
+        // page reveals it for more than one grid card. Tracked across this whole batch (not
+        // per item) and claimed atomically so only the first item to resolve a given URL keeps
+        // it; every later claim on the same URL is treated as a duplicate and left unchanged
+        // rather than silently downloading the same file twice.
+        val claimedUpgradeUrls = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
         pairs.forEach { (media, item) ->
             lifecycleScope.launch {
                 viewModel.updateItem(item.id) { it.copy(crawlStatus = "Quelle wird geprüft…") }
@@ -289,15 +296,28 @@ class MainActivity : AppCompatActivity() {
 
                 val prefix = if (viaLink) "Quelle" else "Quelle (Klick-Simulation)"
                 val match = pickBestMatch(media, candidates)
-                val status = when {
-                    !viaLink && pageUrl == null -> "$prefix: keine Seiten-URL verfügbar"
-                    candidates.isEmpty() -> "$prefix: kein Ergebnis (Timeout, leere Seite oder Element nicht gefunden)"
-                    match == null -> "$prefix: ${candidates.size} Medien gefunden, keins passte"
-                    match.url == item.url -> "$prefix: identisch mit Vorschau"
-                    else -> null // success - cleared below, the upgrade itself is visible
+                if (!viaLink && pageUrl == null) {
+                    viewModel.updateItem(item.id) { it.copy(crawlStatus = "$prefix: keine Seiten-URL verfügbar") }
+                    return@launch
                 }
-                if (match == null || match.url == item.url) {
-                    viewModel.updateItem(item.id) { it.copy(crawlStatus = status) }
+                if (candidates.isEmpty()) {
+                    viewModel.updateItem(item.id) {
+                        it.copy(crawlStatus = "$prefix: kein Ergebnis (Timeout, leere Seite oder Element nicht gefunden)")
+                    }
+                    return@launch
+                }
+                if (match == null) {
+                    viewModel.updateItem(item.id) { it.copy(crawlStatus = "$prefix: ${candidates.size} Medien gefunden, keins passte") }
+                    return@launch
+                }
+                if (match.url == item.url) {
+                    viewModel.updateItem(item.id) { it.copy(crawlStatus = "$prefix: identisch mit Vorschau") }
+                    return@launch
+                }
+                if (!claimedUpgradeUrls.add(match.url)) {
+                    viewModel.updateItem(item.id) {
+                        it.copy(crawlStatus = "$prefix: gleiches Ergebnis wie bei einem anderen Eintrag - übersprungen (Duplikat vermieden)")
+                    }
                     return@launch
                 }
 

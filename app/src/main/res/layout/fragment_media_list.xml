@@ -82,7 +82,7 @@
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/recyclerView"
         android:layout_width="match_parent"
-        android:layout_height="400dp"
+        android:layout_height="300dp"
         android:nestedScrollingEnabled="true"
         tools:listitem="@layout/item_media"
         xmlns:tools="http://schemas.android.com/tools" />

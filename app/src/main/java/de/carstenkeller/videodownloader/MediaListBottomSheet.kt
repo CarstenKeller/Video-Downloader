@@ -8,6 +8,8 @@ import android.widget.Toast
 import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
+import com.google.android.material.bottomsheet.BottomSheetBehavior
+import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import de.carstenkeller.videodownloader.databinding.FragmentMediaListBinding
 import kotlinx.coroutines.flow.combine
@@ -28,6 +30,20 @@ class MediaListBottomSheet : BottomSheetDialogFragment() {
     ): View {
         _binding = FragmentMediaListBinding.inflate(inflater, container, false)
         return binding.root
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Without this, the sheet opens in its collapsed "peek" state - fine for the original
+        // short layout, but the added min-duration controls now push the download button below
+        // that peek height, making it look like the button disappeared. Forcing it fully
+        // expanded (and disabling the half-collapsed state entirely) keeps everything reachable.
+        val sheet = (dialog as? BottomSheetDialog)?.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)
+        sheet?.let {
+            val behavior = BottomSheetBehavior.from(it)
+            behavior.state = BottomSheetBehavior.STATE_EXPANDED
+            behavior.skipCollapsed = true
+        }
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
