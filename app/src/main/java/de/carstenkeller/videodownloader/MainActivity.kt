@@ -1036,10 +1036,23 @@ class MainActivity : AppCompatActivity() {
             httpClient.newCall(builder.build()).execute().use { response ->
                 if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code}")
                 val body = response.body ?: throw java.io.IOException("Leere Antwort")
+                val expectedLength = body.contentLength()
                 val written = tempFile.outputStream().use { out ->
                     copyLimited(body.byteStream(), out, MAX_THUMBNAIL_DOWNLOAD_BYTES)
                 }
                 if (written <= 0L) throw java.io.IOException("Leere Antwort")
+                // Every retrieval strategy in captureFrame() below returning the same degenerate
+                // 1x1 stub for a perfectly ordinary, universally-supported codec (video/avc) -
+                // confirmed via the codec diagnostic - doesn't fit a decoder incompatibility.
+                // This was the one thing not yet verified: a connection that closes early
+                // without an error mid-download would leave a truncated local file whose
+                // container header (and thus duration) can still read fine while the actual
+                // frame data is corrupt/incomplete for every decode attempt. written <= 0
+                // alone doesn't catch that - only comparing against what the server declared
+                // does.
+                if (expectedLength > 0 && written < expectedLength) {
+                    throw java.io.IOException("Download unvollständig ($written von $expectedLength Bytes)")
+                }
             }
 
             val retriever = MediaMetadataRetriever()
