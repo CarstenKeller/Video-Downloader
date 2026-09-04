@@ -1008,6 +1008,19 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             // fall through to the next strategy
         }
+        try {
+            // OPTION_CLOSEST decodes forward from the nearest preceding sync frame to reach the
+            // exact requested timestamp - if that reference-frame chain is broken for this
+            // clip, it fails even though the codec itself (video/avc, confirmed universally
+            // supported) is fine. OPTION_CLOSEST_SYNC instead just returns the nearest actual
+            // sync/keyframe with no decode-forward step - the simplest possible decode a device
+            // can do, and a genuinely different code path worth trying before concluding
+            // MediaMetadataRetriever can't handle this file at all.
+            val bmp = retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            if (isUsable(bmp)) return bmp
+        } catch (e: Exception) {
+            // fall through to the last resort
+        }
         return try {
             retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
         } catch (e: Exception) {
@@ -1085,9 +1098,12 @@ class MainActivity : AppCompatActivity() {
                 val videoHeight = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull()
                 val (dstWidth, dstHeight) = scaledFrameSize(videoWidth, videoHeight)
 
+                // 0L first: the opening sync/keyframe is the simplest possible decode (no
+                // reference-frame chain needed at all), the likeliest candidate to succeed if
+                // anything can.
                 val candidateTimestampsUs = listOfNotNull(
-                    targetUs,
                     0L,
+                    targetUs,
                     if (durationMs != null && durationMs > 0) (durationMs * 1000L * 2) / 3 else null
                 ).distinct()
                 var bitmap: Bitmap? = null
