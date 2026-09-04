@@ -6,6 +6,9 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Build
 import android.graphics.ImageDecoder
+import android.graphics.ImageFormat
+import android.media.Image
+import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
@@ -1029,6 +1032,124 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * Last resort when every MediaMetadataRetriever strategy above returns the same degenerate
+     * 1x1 stub for a completely standard, confirmed-complete video/avc file: decode a frame
+     * directly via MediaExtractor + MediaCodec, bypassing MediaMetadataRetriever's higher-level
+     * (and apparently broken, for this content/device combination) frame-extraction path
+     * entirely. Configuring the codec without an output Surface makes it hand back raw
+     * YUV_420_888 image data we convert ourselves (yuvImageToBitmap) instead of a Bitmap it
+     * produces internally - a fundamentally different code path than anything tried before.
+     */
+    private fun captureFrameViaMediaCodec(path: String, timeUs: Long): Bitmap? {
+        val extractor = MediaExtractor()
+        var codec: MediaCodec? = null
+        return try {
+            extractor.setDataSource(path)
+            var trackIndex = -1
+            var format: MediaFormat? = null
+            for (i in 0 until extractor.trackCount) {
+                val f = extractor.getTrackFormat(i)
+                if (f.getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true) {
+                    trackIndex = i
+                    format = f
+                    break
+                }
+            }
+            val videoFormat = format ?: return null
+            if (trackIndex < 0) return null
+            extractor.selectTrack(trackIndex)
+            extractor.seekTo(timeUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+
+            val mime = videoFormat.getString(MediaFormat.KEY_MIME) ?: return null
+            codec = MediaCodec.createDecoderByType(mime)
+            codec.configure(videoFormat, null, null, 0)
+            codec.start()
+
+            val bufferInfo = MediaCodec.BufferInfo()
+            var result: Bitmap? = null
+            var sawInputEos = false
+            var attempts = 0
+            while (result == null && attempts < 200) {
+                attempts++
+                if (!sawInputEos) {
+                    val inIndex = codec.dequeueInputBuffer(10_000)
+                    if (inIndex >= 0) {
+                        val inputBuffer = codec.getInputBuffer(inIndex)
+                        val sampleSize = inputBuffer?.let { extractor.readSampleData(it, 0) } ?: -1
+                        if (sampleSize < 0) {
+                            codec.queueInputBuffer(inIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            sawInputEos = true
+                        } else {
+                            codec.queueInputBuffer(inIndex, 0, sampleSize, extractor.sampleTime, 0)
+                            extractor.advance()
+                        }
+                    }
+                }
+
+                val outIndex = codec.dequeueOutputBuffer(bufferInfo, 10_000)
+                if (outIndex >= 0) {
+                    if (bufferInfo.size > 0) {
+                        val image = codec.getOutputImage(outIndex)
+                        if (image != null) {
+                            result = yuvImageToBitmap(image)
+                            image.close()
+                        }
+                    }
+                    codec.releaseOutputBuffer(outIndex, false)
+                    if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break
+                }
+            }
+            result
+        } catch (e: Exception) {
+            null
+        } finally {
+            try {
+                codec?.stop()
+            } catch (e: Exception) {
+                // already in a bad state - release() below still needs to run
+            }
+            codec?.release()
+            extractor.release()
+        }
+    }
+
+    /** Manual YUV_420_888 -> ARGB_8888 conversion (BT.601), since Image's plane layout
+     * (row/pixel stride) varies by device and isn't something a library call handles for us
+     * once we're bypassing MediaMetadataRetriever/BitmapFactory entirely. */
+    private fun yuvImageToBitmap(image: Image): Bitmap? {
+        if (image.format != ImageFormat.YUV_420_888) return null
+        val width = image.width
+        val height = image.height
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
+        val yBuffer = yPlane.buffer
+        val uBuffer = uPlane.buffer
+        val vBuffer = vPlane.buffer
+
+        val pixels = IntArray(width * height)
+        for (row in 0 until height) {
+            val yRowStart = row * yPlane.rowStride
+            val uvRow = row / 2
+            val uRowStart = uvRow * uPlane.rowStride
+            val vRowStart = uvRow * vPlane.rowStride
+            for (col in 0 until width) {
+                val y = yBuffer.get(yRowStart + col * yPlane.pixelStride).toInt() and 0xFF
+                val uvCol = col / 2
+                val u = (uBuffer.get(uRowStart + uvCol * uPlane.pixelStride).toInt() and 0xFF) - 128
+                val v = (vBuffer.get(vRowStart + uvCol * vPlane.pixelStride).toInt() and 0xFF) - 128
+
+                val r = (y + 1.370705f * v).toInt().coerceIn(0, 255)
+                val g = (y - 0.337633f * u - 0.698001f * v).toInt().coerceIn(0, 255)
+                val b = (y + 1.732446f * u).toInt().coerceIn(0, 255)
+
+                pixels[row * width + col] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+            }
+        }
+        return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
+    }
+
+    /**
      * Downloads the video to a temp file (capped at [MAX_THUMBNAIL_DOWNLOAD_BYTES]) and
      * extracts the frame from that local file, instead of pointing MediaMetadataRetriever at
      * the network URL directly. Reported symptom that led here: the downloaded file itself
@@ -1113,6 +1234,16 @@ class MainActivity : AppCompatActivity() {
                     if (!isLikelyBlankFrame(candidate)) {
                         bitmap = candidate
                         break
+                    }
+                }
+                // Every MediaMetadataRetriever-based strategy above still returning a degenerate
+                // stub for a confirmed-complete, standard video/avc file (see the two preceding
+                // fix rounds this went through) points to a MediaMetadataRetriever limitation on
+                // this device/content, not a fixable seek/config parameter. Decode a frame
+                // directly instead, bypassing it entirely.
+                if (bitmap == null || isLikelyBlankFrame(bitmap)) {
+                    captureFrameViaMediaCodec(tempFile.absolutePath, candidateTimestampsUs.first())?.let {
+                        if (!isLikelyBlankFrame(it)) bitmap = it
                     }
                 }
                 val finalBitmap = bitmap ?: throw IllegalStateException("Kein Frame extrahierbar")
