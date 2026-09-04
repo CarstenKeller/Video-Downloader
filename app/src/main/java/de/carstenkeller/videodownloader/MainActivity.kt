@@ -826,7 +826,11 @@ class MainActivity : AppCompatActivity() {
                 try {
                     when {
                         item.streamPlan != null -> bitmap = extractStreamThumbnail(item.streamPlan, item.sourcePageUrl)
-                        item.kind == MediaKind.GIF -> bitmap = loadBitmapFromUrl(item.url, item.sourcePageUrl)
+                        item.kind == MediaKind.GIF -> {
+                            val bytes = downloadCapped(item.url, item.sourcePageUrl, MAX_THUMBNAIL_DOWNLOAD_BYTES)
+                            bitmap = decodeBitmap(bytes) ?: throw java.io.IOException("Nicht dekodierbar (${bytes.size} Bytes)")
+                            durationMs = GifDuration.parseMs(bytes)
+                        }
                         item.posterUrl != null -> bitmap = loadBitmapFromUrl(item.posterUrl, item.sourcePageUrl)
                         else -> {
                             val frame = extractVideoFrame(item.url, item.sourcePageUrl)
@@ -858,12 +862,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadBitmapFromUrl(url: String, referer: String?): Bitmap {
+        val bytes = downloadCapped(url, referer, MAX_THUMBNAIL_DOWNLOAD_BYTES)
+        return decodeBitmap(bytes) ?: throw java.io.IOException("Nicht dekodierbar (${bytes.size} Bytes)")
+    }
+
+    /** Downloads into memory, capped at [maxBytes] so a large file only ever gets partially
+     * read for a thumbnail/duration check - see [MAX_THUMBNAIL_DOWNLOAD_BYTES]. */
+    private fun downloadCapped(url: String, referer: String?, maxBytes: Long): ByteArray {
         val builder = withCommonHeaders(Request.Builder().url(url), url)
         if (referer != null) builder.header("Referer", referer)
         httpClient.newCall(builder.build()).execute().use { response ->
             if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code}")
-            val bytes = response.body?.bytes() ?: throw java.io.IOException("Leere Antwort")
-            return decodeBitmap(bytes) ?: throw java.io.IOException("Nicht dekodierbar (${bytes.size} Bytes)")
+            val body = response.body ?: throw java.io.IOException("Leere Antwort")
+            val buffer = java.io.ByteArrayOutputStream()
+            val written = copyLimited(body.byteStream(), buffer, maxBytes)
+            if (written <= 0L) throw java.io.IOException("Leere Antwort")
+            return buffer.toByteArray()
         }
     }
 
