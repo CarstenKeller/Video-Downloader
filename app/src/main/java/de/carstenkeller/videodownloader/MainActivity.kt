@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.Build
 import android.graphics.ImageDecoder
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -959,6 +960,56 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** A thumbnail-sized bounding box preserving the source video's aspect ratio, capped at
+     * 480px on the longer side - falls back to a fixed size when dimensions aren't known. */
+    private fun scaledFrameSize(videoWidth: Int?, videoHeight: Int?): Pair<Int, Int> {
+        val maxDim = 480
+        if (videoWidth == null || videoHeight == null || videoWidth <= 0 || videoHeight <= 0) {
+            return maxDim to (maxDim * 9 / 16)
+        }
+        return if (videoWidth >= videoHeight) {
+            maxDim to (maxDim * videoHeight / videoWidth).coerceAtLeast(1)
+        } else {
+            (maxDim * videoWidth / videoHeight).coerceAtLeast(1) to maxDim
+        }
+    }
+
+    /**
+     * Tries a couple of retrieval paths documented to avoid the 1x1-HARDWARE-stub bug (see the
+     * call site's comment) before falling back to the plain call, in order:
+     * 1. (API 30+) getFrameAtTime with BitmapParams forcing a software (ARGB_8888) config -
+     *    the most direct fix, since the stub is specifically a side effect of hardware decoding.
+     * 2. getScaledFrameAtTime with an explicit target size - a different internal code path
+     *    that empirically avoids the same bug on older API levels.
+     * 3. The plain two-argument getFrameAtTime, as a last resort.
+     * Each step is skipped (not treated as fatal) if it throws or returns a still-degenerate
+     * (<=1px) result, moving on to the next.
+     */
+    private fun captureFrame(retriever: MediaMetadataRetriever, timeUs: Long, dstWidth: Int, dstHeight: Int): Bitmap? {
+        fun isUsable(bmp: Bitmap?) = bmp != null && bmp.width > 1 && bmp.height > 1
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val params = MediaMetadataRetriever.BitmapParams().apply { preferredConfig = Bitmap.Config.ARGB_8888 }
+                val bmp = retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST, params)
+                if (isUsable(bmp)) return bmp
+            } catch (e: Exception) {
+                // fall through to the next strategy
+            }
+        }
+        try {
+            val bmp = retriever.getScaledFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST, dstWidth, dstHeight)
+            if (isUsable(bmp)) return bmp
+        } catch (e: Exception) {
+            // fall through to the next strategy
+        }
+        return try {
+            retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     /**
      * Downloads the video to a temp file (capped at [MAX_THUMBNAIL_DOWNLOAD_BYTES]) and
      * extracts the frame from that local file, instead of pointing MediaMetadataRetriever at
@@ -1005,12 +1056,17 @@ class MainActivity : AppCompatActivity() {
                     ?: extractDurationViaTrackFormat(tempFile.absolutePath)
                 val targetUs = if (durationMs != null && durationMs > 0) (durationMs * 1000L) / 3 else 300_000L
 
-                // MediaMetadataRetriever can "succeed" with a technically valid but visually
-                // blank/flat-colored bitmap for a given timestamp (the exact failure mode that
-                // originally led to reading from a local file at all, above) - so rather than
-                // trust the first non-null frame, try a few candidate timestamps and keep the
-                // first one that actually looks like real content, falling back to whichever
-                // decoded frame was found if every candidate looks blank.
+                // Confirmed via the thumbnailDebug diagnostic in the field: plain getFrameAtTime
+                // can return a degenerate 1x1 HARDWARE-config "stub" bitmap - not null, not an
+                // exception, just a fake frame - when the hardware decoder fails on a given
+                // codec/profile. captureFrame below tries a couple of retrieval paths that are
+                // documented workarounds for exactly this AOSP bug before giving up on a
+                // timestamp; isLikelyBlankFrame (also matching 1x1) then still guards against a
+                // technically-valid but visually blank real frame on top of that.
+                val videoWidth = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull()
+                val videoHeight = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull()
+                val (dstWidth, dstHeight) = scaledFrameSize(videoWidth, videoHeight)
+
                 val candidateTimestampsUs = listOfNotNull(
                     targetUs,
                     0L,
@@ -1018,7 +1074,7 @@ class MainActivity : AppCompatActivity() {
                 ).distinct()
                 var bitmap: Bitmap? = null
                 for (ts in candidateTimestampsUs) {
-                    val candidate = retriever.getFrameAtTime(ts, MediaMetadataRetriever.OPTION_CLOSEST) ?: continue
+                    val candidate = captureFrame(retriever, ts, dstWidth, dstHeight) ?: continue
                     if (bitmap == null) bitmap = candidate
                     if (!isLikelyBlankFrame(candidate)) {
                         bitmap = candidate
