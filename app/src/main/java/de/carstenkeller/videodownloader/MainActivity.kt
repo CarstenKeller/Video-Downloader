@@ -338,6 +338,7 @@ class MainActivity : AppCompatActivity() {
                         sizeBytes = null,
                         thumbnail = null,
                         thumbnailError = null,
+                        thumbnailDebug = null,
                         crawlStatus = null,
                         durationMs = null,
                         durationUnknown = false,
@@ -874,6 +875,7 @@ class MainActivity : AppCompatActivity() {
                         it.copy(
                             thumbnail = bitmap,
                             thumbnailError = if (bitmap == null) error else null,
+                            thumbnailDebug = bitmap?.let { b -> "${b.width}x${b.height} ${b.config}" },
                             durationMs = durationMs ?: it.durationMs,
                             durationUnknown = durationAttempted && durationMs == null && bitmap != null,
                             durationPending = false
@@ -935,19 +937,25 @@ class MainActivity : AppCompatActivity() {
      * a blank/black/white placeholder frame reliably does.
      */
     private fun isLikelyBlankFrame(bitmap: Bitmap): Boolean {
-        val width = bitmap.width
-        val height = bitmap.height
-        if (width <= 1 || height <= 1) return true
-        val fractions = listOf(0.1f, 0.5f, 0.9f)
-        val samples = fractions.flatMap { fx -> fractions.map { fy -> fx to fy } }.map { (fx, fy) ->
-            bitmap.getPixel((fx * (width - 1)).toInt(), (fy * (height - 1)).toInt())
-        }
-        val reference = samples.first()
-        val tolerance = 12
-        return samples.all { pixel ->
-            kotlin.math.abs(android.graphics.Color.red(pixel) - android.graphics.Color.red(reference)) <= tolerance &&
-                kotlin.math.abs(android.graphics.Color.green(pixel) - android.graphics.Color.green(reference)) <= tolerance &&
-                kotlin.math.abs(android.graphics.Color.blue(pixel) - android.graphics.Color.blue(reference)) <= tolerance
+        return try {
+            val width = bitmap.width
+            val height = bitmap.height
+            if (width <= 1 || height <= 1) return true
+            val fractions = listOf(0.1f, 0.5f, 0.9f)
+            val samples = fractions.flatMap { fx -> fractions.map { fy -> fx to fy } }.map { (fx, fy) ->
+                bitmap.getPixel((fx * (width - 1)).toInt(), (fy * (height - 1)).toInt())
+            }
+            val reference = samples.first()
+            val tolerance = 12
+            samples.all { pixel ->
+                kotlin.math.abs(android.graphics.Color.red(pixel) - android.graphics.Color.red(reference)) <= tolerance &&
+                    kotlin.math.abs(android.graphics.Color.green(pixel) - android.graphics.Color.green(reference)) <= tolerance &&
+                    kotlin.math.abs(android.graphics.Color.blue(pixel) - android.graphics.Color.blue(reference)) <= tolerance
+            }
+        } catch (e: Exception) {
+            // getPixel() throws for a HARDWARE-config bitmap - accept the candidate as-is
+            // rather than losing the whole frame/duration extraction over a blankness check.
+            false
         }
     }
 

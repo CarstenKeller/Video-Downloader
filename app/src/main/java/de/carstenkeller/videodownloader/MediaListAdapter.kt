@@ -61,6 +61,8 @@ class MediaListAdapter(
         if (item.thumbnail == null && item.thumbnailError != null) {
             subtitle += "\n⚠ Thumbnail: ${item.thumbnailError}"
         }
+        // Temporary diagnostic - see MediaItem.thumbnailDebug.
+        item.thumbnailDebug?.let { subtitle += "\n🔧 Frame: $it" }
         // See MediaItem.durationUnknown - without this, an item the length filter couldn't
         // judge just silently shows up regardless of the slider, which looks like the filter
         // doesn't work at all rather than like a specific, unmeasurable file.

@@ -64,5 +64,12 @@ data class MediaItem(
     // download attempt could act on; the row is shown (so the user knows it was found) but not
     // selectable, rather than letting a download attempt save the raw manifest text as if it
     // were the video.
-    val downloadDisabled: Boolean = false
+    val downloadDisabled: Boolean = false,
+    // Temporary diagnostic: dimensions and pixel config of whatever bitmap ended up in
+    // [thumbnail] (e.g. "320x180 ARGB_8888"), when it's not null. The reported symptom this is
+    // for - duration measured correctly, but the shown thumbnail looks like a flat blank box
+    // with no decode error at all - is only possible if a real, non-null bitmap came back from
+    // extraction; this surfaces its actual dimensions/format so a real content-vs-rendering
+    // distinction can be made from a screenshot instead of guessed at again.
+    val thumbnailDebug: String? = null
 )
