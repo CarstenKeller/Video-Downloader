@@ -38,6 +38,13 @@ data class MediaItem(
     // it's visible *why* the minimum-length filter didn't hide an item, instead of it looking
     // like the filter silently does nothing.
     val durationUnknown: Boolean = false,
+    // True from the moment an item capable of having a duration (a real .gif or a video, but
+    // not a poster-thumbnailed or streamed one - see MainActivity.fetchThumbnails) is added
+    // until that background extraction actually finishes. Lets the minimum-length filter treat
+    // "not measured yet" differently from "permanently unknown" (durationMs still null but
+    // durationUnknown true): a real bug otherwise let a short clip slip through a download
+    // started the instant it appeared, before its true length had even been checked yet.
+    val durationPending: Boolean = false,
     // Diagnostic text for the source-page crawl (see MainActivity.upgradeFromSourceLinks),
     // shown in the list so real crawl behavior can be read off the device instead of guessed
     // at - previous guesses about *why* a crawl didn't improve an item have repeatedly not

@@ -248,7 +248,8 @@ class MainActivity : AppCompatActivity() {
                 fileName = fileNames[index],
                 posterUrl = media.posterUrl,
                 sourcePageUrl = currentPageUrl,
-                looksLikeGif = media.looksLikeGif
+                looksLikeGif = media.looksLikeGif,
+                durationPending = media.posterUrl == null
             )
         }
 
@@ -337,7 +338,8 @@ class MainActivity : AppCompatActivity() {
                         thumbnailError = null,
                         crawlStatus = null,
                         durationMs = null,
-                        durationUnknown = false
+                        durationUnknown = false,
+                        durationPending = match.posterUrl == null
                     )
                 }
                 val updated = viewModel.items.value.find { it.id == item.id } ?: return@launch
@@ -530,7 +532,8 @@ class MainActivity : AppCompatActivity() {
                     fileName = fileNames[index],
                     posterUrl = media.posterUrl,
                     sourcePageUrl = link,
-                    looksLikeGif = media.looksLikeGif
+                    looksLikeGif = media.looksLikeGif,
+                    durationPending = media.posterUrl == null
                 )
             }
             viewModel.setItems(existing + newItems)
@@ -856,7 +859,8 @@ class MainActivity : AppCompatActivity() {
                             thumbnail = bitmap,
                             thumbnailError = if (bitmap == null) error else null,
                             durationMs = durationMs ?: it.durationMs,
-                            durationUnknown = durationAttempted && durationMs == null && bitmap != null
+                            durationUnknown = durationAttempted && durationMs == null && bitmap != null,
+                            durationPending = false
                         )
                     }
                 }

@@ -54,6 +54,10 @@ class MediaListViewModel : ViewModel() {
 
 fun isVisibleForMinDuration(item: MediaItem, minDurationSeconds: Int): Boolean {
     if (minDurationSeconds <= 0) return true
+    // Not measured yet, as opposed to durationMs being permanently null (durationPending false)
+    // - hide it from selection/download until it settles, rather than let it through simply
+    // because its (possibly too-short) length hadn't been checked yet.
+    if (item.durationPending) return false
     val durationMs = item.durationMs ?: return true
     return durationMs >= minDurationSeconds * 1000L
 }
