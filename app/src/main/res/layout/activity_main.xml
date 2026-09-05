@@ -79,6 +79,22 @@
             android:background="?attr/selectableItemBackgroundBorderless"
             android:contentDescription="@string/action_scan"
             android:src="@drawable/ic_search" />
+
+        <ImageButton
+            android:id="@+id/btnBookmark"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/action_bookmark_add"
+            android:src="@drawable/ic_star_outline" />
+
+        <ImageButton
+            android:id="@+id/btnMenu"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/action_menu"
+            android:src="@drawable/ic_more_vert" />
     </LinearLayout>
 
     <ProgressBar

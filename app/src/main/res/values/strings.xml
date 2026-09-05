@@ -6,6 +6,18 @@
     <string name="action_forward">Vorwärts</string>
     <string name="action_reload">Neu laden</string>
     <string name="action_scan">Medien auf dieser Seite suchen</string>
+    <string name="action_bookmark_add">Zu Favoriten hinzufügen</string>
+    <string name="action_bookmark_remove">Aus Favoriten entfernen</string>
+    <string name="action_menu">Weitere Optionen</string>
+    <string name="menu_show_bookmarks">Favoriten anzeigen</string>
+    <string name="menu_about">Über die App</string>
+
+    <string name="bookmark_added">Zu Favoriten hinzugefügt</string>
+    <string name="bookmark_removed">Aus Favoriten entfernt</string>
+    <string name="bookmark_remove">Entfernen</string>
+    <string name="bookmark_list_title">Favoriten</string>
+    <string name="bookmark_list_empty">Noch keine Favoriten gespeichert</string>
+    <string name="about_message">%1$s\nVersion %2$s</string>
 
     <string name="no_media_found">Keine Videos oder GIFs auf dieser Seite gefunden</string>
     <string name="scan_failed">Seite konnte nicht durchsucht werden</string>

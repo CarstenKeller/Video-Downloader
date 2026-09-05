@@ -49,10 +49,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private val viewModel: MediaListViewModel by viewModels()
     private val httpClient = OkHttpClient()
+    private val bookmarkStore by lazy { BookmarkStore(applicationContext) }
 
     private var customView: View? = null
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
     private var lastHost: String? = null
+    private var currentPageTitle: String? = null
 
     // Only one hidden crawler WebView exists, so only one source page can be crawled at a
     // time - this serializes crawlSourcePage() calls instead of letting them race on it.
@@ -102,6 +104,7 @@ class MainActivity : AppCompatActivity() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 binding.progressBar.visibility = View.VISIBLE
                 if (url != null) binding.addressBar.setText(url)
+                updateBookmarkIcon(url)
 
                 // Only clear the media list when navigating to a genuinely different site
                 // (different host). Many pages reload/paginate within the same site while
@@ -118,6 +121,7 @@ class MainActivity : AppCompatActivity() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 binding.progressBar.visibility = View.GONE
                 if (url != null) binding.addressBar.setText(url)
+                updateBookmarkIcon(url)
             }
 
             override fun shouldInterceptRequest(
@@ -138,6 +142,10 @@ class MainActivity : AppCompatActivity() {
         binding.webView.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
                 binding.progressBar.progress = newProgress
+            }
+
+            override fun onReceivedTitle(view: WebView?, title: String?) {
+                currentPageTitle = title
             }
 
             override fun onShowCustomView(view: View, callback: CustomViewCallback) {
@@ -183,6 +191,8 @@ class MainActivity : AppCompatActivity() {
         binding.btnForward.setOnClickListener { if (binding.webView.canGoForward()) binding.webView.goForward() }
         binding.btnReload.setOnClickListener { binding.webView.reload() }
         binding.btnScan.setOnClickListener { scanCurrentPage() }
+        binding.btnBookmark.setOnClickListener { toggleBookmark() }
+        binding.btnMenu.setOnClickListener { showOverflowMenu() }
 
         binding.addressBar.setOnEditorActionListener { _, actionId, event ->
             val isEnterKey = event != null && event.keyCode == KeyEvent.KEYCODE_ENTER
@@ -193,6 +203,67 @@ class MainActivity : AppCompatActivity() {
                 false
             }
         }
+    }
+
+    private fun updateBookmarkIcon(url: String?) {
+        val bookmarked = url != null && bookmarkStore.isBookmarked(url)
+        binding.btnBookmark.setImageResource(if (bookmarked) R.drawable.ic_star_filled else R.drawable.ic_star_outline)
+        binding.btnBookmark.contentDescription = getString(
+            if (bookmarked) R.string.action_bookmark_remove else R.string.action_bookmark_add
+        )
+    }
+
+    private fun toggleBookmark() {
+        val url = binding.webView.url ?: return
+        if (bookmarkStore.isBookmarked(url)) {
+            bookmarkStore.remove(url)
+            Toast.makeText(this, R.string.bookmark_removed, Toast.LENGTH_SHORT).show()
+        } else {
+            bookmarkStore.add(Bookmark(title = currentPageTitle?.takeIf { it.isNotBlank() } ?: url, url = url))
+            Toast.makeText(this, R.string.bookmark_added, Toast.LENGTH_SHORT).show()
+        }
+        updateBookmarkIcon(url)
+    }
+
+    private fun showOverflowMenu() {
+        val popup = android.widget.PopupMenu(this, binding.btnMenu)
+        popup.menu.add(0, 0, 0, R.string.menu_show_bookmarks)
+        popup.menu.add(0, 1, 1, R.string.menu_about)
+        popup.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                0 -> {
+                    showBookmarkList()
+                    true
+                }
+                1 -> {
+                    showAboutDialog()
+                    true
+                }
+                else -> false
+            }
+        }
+        popup.show()
+    }
+
+    private fun showBookmarkList() {
+        supportFragmentManager.setFragmentResultListener(
+            BookmarkListBottomSheet.REQUEST_KEY,
+            this
+        ) { _, bundle ->
+            bundle.getString(BookmarkListBottomSheet.RESULT_URL)?.let { binding.webView.loadUrl(it) }
+        }
+        BookmarkListBottomSheet().show(supportFragmentManager, BookmarkListBottomSheet.TAG)
+    }
+
+    private fun showAboutDialog() {
+        val versionName = runCatching {
+            packageManager.getPackageInfo(packageName, 0).versionName
+        }.getOrNull() ?: "?"
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle(R.string.menu_about)
+            .setMessage(getString(R.string.about_message, getString(R.string.app_name), versionName))
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
     }
 
     private fun loadTypedUrl() {
