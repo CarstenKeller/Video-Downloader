@@ -98,9 +98,15 @@ class MainActivity : AppCompatActivity() {
             mediaPlaybackRequiresUserGesture = false
             loadWithOverviewMode = true
             useWideViewPort = true
+            applyHardening()
         }
 
         binding.webView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(
+                view: WebView?,
+                request: android.webkit.WebResourceRequest?
+            ): Boolean = blockNonHttpNavigation(request?.url)
+
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 binding.progressBar.visibility = View.VISIBLE
                 if (url != null) binding.addressBar.setText(url)
@@ -148,6 +154,17 @@ class MainActivity : AppCompatActivity() {
                 currentPageTitle = title
             }
 
+            // Blocks window.open()/target="_blank" popups outright rather than opening a second
+            // WebView for them - a very common malvertising vector (fake "close ad" buttons,
+            // forced app-store redirects) on the kind of sites this app browses, and this app
+            // has no UI for a second browser window anyway.
+            override fun onCreateWindow(
+                view: WebView?,
+                isDialog: Boolean,
+                isUserGesture: Boolean,
+                resultMsg: android.os.Message?
+            ): Boolean = false
+
             override fun onShowCustomView(view: View, callback: CustomViewCallback) {
                 if (customView != null) {
                     callback.onCustomViewHidden()
@@ -183,7 +200,51 @@ class MainActivity : AppCompatActivity() {
             domStorageEnabled = true
             loadWithOverviewMode = true
             useWideViewPort = true
+            applyHardening()
         }
+        // This WebView loads arbitrary linked source pages in the background (see
+        // crawlSourcePage) - just as untrusted as whatever the visible WebView shows, so it
+        // gets the same navigation-scheme restriction. It never needs to display a Safe
+        // Browsing/HTTPS warning UI to the user, but blocking the same way keeps the crawl from
+        // ever escaping into another app either.
+        binding.crawlerWebView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(
+                view: WebView?,
+                request: android.webkit.WebResourceRequest?
+            ): Boolean = blockNonHttpNavigation(request?.url, silent = true)
+        }
+    }
+
+    /**
+     * Shared WebView hardening applied to both the visible browser and the background crawler:
+     * no local file access (neither WebView ever needs to load a file:// URL, so this closes
+     * off a known WebView attack chain that combines JS with local file reads), and mixed
+     * content pinned explicitly rather than left to whatever a future WebView version defaults
+     * to. Popups are blocked in the WebChromeClient instead (see onCreateWindow) since that's
+     * not a WebSettings flag.
+     */
+    private fun android.webkit.WebSettings.applyHardening() {
+        allowFileAccess = false
+        mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
+        javaScriptCanOpenWindowsAutomatically = false
+        setSupportMultipleWindows(false)
+    }
+
+    /**
+     * Only lets http/https navigation proceed normally. Blocks everything else - intent://,
+     * market://, tel:, mailto:, custom app schemes, ... - instead of the common (and
+     * historically exploited) pattern of parsing and forwarding them as an Intent: a page this
+     * app renders should never be able to jump straight into another app, the Play Store, or the
+     * dialer without the user having asked for that. Returning true here only cancels this one
+     * navigation attempt - it never affects binding.webView.loadUrl() calls this app makes
+     * itself (address bar, bookmarks, stream links), since those aren't page-initiated
+     * navigations at all.
+     */
+    private fun blockNonHttpNavigation(url: Uri?, silent: Boolean = false): Boolean {
+        val scheme = url?.scheme?.lowercase()
+        if (scheme == "http" || scheme == "https") return false
+        if (!silent) Toast.makeText(this, R.string.navigation_blocked, Toast.LENGTH_SHORT).show()
+        return true
     }
 
     private fun setupControls() {

@@ -9,6 +9,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import java.io.IOException
 
 private const val MAX_CONCURRENT_DOWNLOADS = 3
@@ -53,6 +54,7 @@ class DownloadCoordinator(
             val request = requestBuilder.build()
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+                checkAcceptableContentType(response, item.kind)
                 val body = response.body ?: throw IOException("Leere Antwort")
                 val total = item.sizeBytes?.takeIf { it > 0 } ?: body.contentLength().takeIf { it > 0 }
 
@@ -99,6 +101,7 @@ class DownloadCoordinator(
                         if (!response.isSuccessful) {
                             throw IOException("Segment ${index + 1}/${segments.size}: HTTP ${response.code}")
                         }
+                        checkAcceptableContentType(response, item.kind)
                         val body = response.body ?: throw IOException("Segment ${index + 1}/${segments.size}: leere Antwort")
                         body.byteStream().copyTo(output)
                     }
@@ -111,6 +114,27 @@ class DownloadCoordinator(
             }
         } catch (e: Exception) {
             onDone(item.id, false, e.message ?: "Fehler")
+        }
+    }
+
+    /**
+     * A URL scanned as an image/video isn't guaranteed to actually serve one back - the server's
+     * declared Content-Type is the only cheap check available before the bytes are already being
+     * written into the user's Photos album under a video/image MIME type (see
+     * MediaSaver.guessMimeType and MediaScanner.deriveFileName, which keep the *saved* file
+     * honestly typed even when the source turns out to be something else entirely, e.g. an
+     * expired-link HTML error page or an outright disguised payload). This won't catch a server
+     * that lies about its own Content-Type - nothing at this layer can - but it does catch the
+     * mismatch when it's there, rather than never looking at all. "application/octet-stream" is
+     * allowed through since many plain media/CDN hosts genuinely use it as a generic default.
+     */
+    private fun checkAcceptableContentType(response: Response, kind: MediaKind) {
+        val contentType = response.header("Content-Type")?.substringBefore(';')?.trim()?.lowercase()
+            ?: return
+        val expectedPrefix = if (kind == MediaKind.GIF) "image/" else "video/"
+        val genericBinaryTypes = setOf("application/octet-stream", "binary/octet-stream", "application/binary")
+        if (!contentType.startsWith(expectedPrefix) && contentType !in genericBinaryTypes) {
+            throw IOException("Unerwarteter Inhaltstyp vom Server: $contentType")
         }
     }
 }

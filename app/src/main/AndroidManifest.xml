@@ -12,6 +12,13 @@
         android:usesCleartextTraffic="true"
         android:theme="@style/Theme.VideoDownloader">
 
+        <!-- Explicit, rather than relying on the WebView default, so this app's protection
+             against known malware/phishing pages (Google Safe Browsing) can't silently end up
+             off because of a device/OEM WebView configuration difference. -->
+        <meta-data
+            android:name="android.webkit.WebView.EnableSafeBrowsing"
+            android:value="true" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

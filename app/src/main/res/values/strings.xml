@@ -9,6 +9,7 @@
     <string name="action_bookmark_add">Zu Favoriten hinzufügen</string>
     <string name="action_bookmark_remove">Aus Favoriten entfernen</string>
     <string name="action_menu">Weitere Optionen</string>
+    <string name="navigation_blocked">Navigation blockiert: nicht unterstütztes Protokoll</string>
     <string name="menu_show_bookmarks">Favoriten anzeigen</string>
     <string name="menu_about">Über die App</string>
 

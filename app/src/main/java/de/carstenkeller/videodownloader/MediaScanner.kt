@@ -200,8 +200,18 @@ object MediaScanner {
         }
     }
 
+    // Real media extensions this app will actually save a file as - deliberately not "whatever
+    // extension the source URL happens to have". A malicious page can put anything it likes as
+    // a <video src="…">, including something like "payload.apk"; without this whitelist, that
+    // extension would be carried straight through into the saved file name (and, via
+    // MediaSaver.guessMimeType, its MediaStore MIME type too), which is a very different thing
+    // to hand back to the user than "an unrecognized video that happens to be named .apk".
+    private val VIDEO_EXTENSIONS = setOf("mp4", "webm", "mov", "mkv", "m4v", "3gp", "ts", "m4s", "ogv", "avi", "flv")
+    private val GIF_EXTENSIONS = setOf("gif")
+
     fun deriveFileName(url: String, kind: MediaKind, fallbackIndex: Int): String {
         val defaultExt = if (kind == MediaKind.GIF) "gif" else "mp4"
+        val allowedExtensions = if (kind == MediaKind.GIF) GIF_EXTENSIONS else VIDEO_EXTENSIONS
         val lastSegment = try {
             Uri.parse(url).lastPathSegment?.substringBefore('?')
         } catch (e: Exception) {
@@ -210,8 +220,13 @@ object MediaScanner {
         var name = lastSegment?.let { runCatching { Uri.decode(it) }.getOrDefault(it) }.orEmpty()
         if (name.isBlank()) {
             name = "media_$fallbackIndex.$defaultExt"
-        } else if (!name.contains('.')) {
-            name = "$name.$defaultExt"
+        } else {
+            val dot = name.lastIndexOf('.')
+            val ext = if (dot >= 0) name.substring(dot + 1).lowercase() else ""
+            if (ext !in allowedExtensions) {
+                val base = if (dot >= 0) name.substring(0, dot) else name
+                name = "$base.$defaultExt"
+            }
         }
         return name.replace(Regex("[\\\\/:*?\"<>|]"), "_")
     }
