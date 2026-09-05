@@ -858,6 +858,16 @@ class MainActivity : AppCompatActivity() {
                             bitmap = decodeBitmap(bytes) ?: throw java.io.IOException("Nicht dekodierbar (${bytes.size} Bytes)")
                             durationMs = GifDuration.parseMs(bytes)
                         }
+                        item.looksLikeGif -> {
+                            // The list shows a live, looping preview for this instead of a
+                            // static thumbnail (see MediaListAdapter) - extracting a
+                            // representative frame here would be wasted work (nothing renders
+                            // it) and, per extensive on-device testing, was the one thing that
+                            // never worked reliably for this content anyway. Duration is still
+                            // needed for the minimum-length filter, so that alone is fetched.
+                            durationAttempted = true
+                            durationMs = extractVideoDuration(item.url, item.sourcePageUrl)
+                        }
                         else -> {
                             // Duration can only come from the real file - always read it here,
                             // poster or not (see the fetchThumbnails doc comment above). The
@@ -1282,6 +1292,43 @@ class MainActivity : AppCompatActivity() {
                 val finalBitmap = bitmap ?: throw IllegalStateException("Kein Frame extrahierbar")
                 val codecMime = extractVideoCodecMime(tempFile.absolutePath)
                 return VideoFrame(finalBitmap, durationMs, codecMime, codecFallbackFailure)
+            } finally {
+                retriever.release()
+            }
+        } finally {
+            tempFile.delete()
+        }
+    }
+
+    /**
+     * Duration only, no frame/Bitmap decode at all - used for a looksLikeGif video (see
+     * fetchThumbnails and MediaListAdapter), which gets a live playback preview in the list
+     * instead of a static thumbnail, so extracting a frame for it would be wasted work. Same
+     * download-and-read approach as extractVideoFrame (proven reliable for duration - the
+     * frame/Bitmap side was the only part that ever had trouble).
+     */
+    private fun extractVideoDuration(url: String, referer: String?): Long? {
+        val tempFile = File.createTempFile("dur_", ".tmp", cacheDir)
+        try {
+            val builder = withCommonHeaders(Request.Builder().url(url), url)
+            if (referer != null) builder.header("Referer", referer)
+            httpClient.newCall(builder.build()).execute().use { response ->
+                if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code}")
+                val body = response.body ?: throw java.io.IOException("Leere Antwort")
+                val expectedLength = body.contentLength()
+                val written = tempFile.outputStream().use { out ->
+                    copyLimited(body.byteStream(), out, MAX_THUMBNAIL_DOWNLOAD_BYTES)
+                }
+                if (written <= 0L) throw java.io.IOException("Leere Antwort")
+                if (expectedLength > 0 && written < expectedLength) {
+                    throw java.io.IOException("Download unvollständig ($written von $expectedLength Bytes)")
+                }
+            }
+            val retriever = MediaMetadataRetriever()
+            return try {
+                retriever.setDataSource(tempFile.absolutePath)
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
+                    ?: extractDurationViaTrackFormat(tempFile.absolutePath)
             } finally {
                 retriever.release()
             }

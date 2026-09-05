@@ -14,14 +14,31 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content" />
 
-    <ImageView
-        android:id="@+id/thumbnail"
+    <FrameLayout
         android:layout_width="48dp"
         android:layout_height="48dp"
-        android:layout_marginStart="12dp"
-        android:background="#E0E0E0"
-        android:contentDescription="@null"
-        android:scaleType="centerCrop" />
+        android:layout_marginStart="12dp">
+
+        <ImageView
+            android:id="@+id/thumbnail"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="#E0E0E0"
+            android:contentDescription="@null"
+            android:scaleType="centerCrop" />
+
+        <!-- Live, muted, looping preview for a <video loop muted> that behaves like a GIF -
+             see MediaListAdapter. Frame-extraction to a static Bitmap for this exact content
+             (real videos masquerading as GIFs) proved unfixable across many attempts on some
+             devices (MediaMetadataRetriever/MediaCodec both only ever produced a degenerate 1x1
+             stub) - normal Surface-based video playback is a completely different, far more
+             reliable code path, and showing the real thing sidesteps the problem entirely. -->
+        <TextureView
+            android:id="@+id/videoPreview"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone" />
+    </FrameLayout>
 
     <LinearLayout
         android:layout_width="0dp"
