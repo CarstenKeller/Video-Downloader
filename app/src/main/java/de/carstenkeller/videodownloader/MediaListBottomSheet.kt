@@ -4,7 +4,6 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.Toast
 import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -14,7 +13,6 @@ import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import de.carstenkeller.videodownloader.databinding.FragmentMediaListBinding
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
-import okhttp3.OkHttpClient
 
 class MediaListBottomSheet : BottomSheetDialogFragment() {
 
@@ -119,31 +117,11 @@ class MediaListBottomSheet : BottomSheetDialogFragment() {
             viewModel.updateItem(item.id) { it.copy(status = DownloadStatus.DOWNLOADING, progress = -1) }
         }
 
-        val client = OkHttpClient()
-        val coordinator = DownloadCoordinator(requireContext().applicationContext, client)
-
-        viewLifecycleOwner.lifecycleScope.launch {
-            coordinator.downloadAll(
-                items = selected,
-                onProgress = { id, pct -> viewModel.updateItem(id) { it.copy(progress = pct) } },
-                onDone = { id, success, error ->
-                    viewModel.updateItem(id) {
-                        it.copy(
-                            status = if (success) DownloadStatus.DONE else DownloadStatus.ERROR,
-                            errorMessage = error
-                        )
-                    }
-                }
-            )
-            viewModel.setDownloading(false)
-            val results = viewModel.items.value
-            val successCount = selected.count { sel -> results.any { it.id == sel.id && it.status == DownloadStatus.DONE } }
-            Toast.makeText(
-                requireContext(),
-                getString(R.string.download_summary, successCount, selected.size),
-                Toast.LENGTH_LONG
-            ).show()
-        }
+        // DownloadService runs the batch independently of this fragment's own lifecycle - see
+        // its class doc. viewModel picks progress/completion back up via DownloadEvents
+        // (wired in MediaListViewModel.init) for as long as the app is around to show it; the
+        // service's own notification is the only feedback once it isn't.
+        DownloadService.start(requireContext().applicationContext, selected)
     }
 
     override fun onDestroyView() {

@@ -1,9 +1,11 @@
 package de.carstenkeller.videodownloader
 
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 
 class MediaListViewModel : ViewModel() {
 
@@ -12,6 +14,27 @@ class MediaListViewModel : ViewModel() {
 
     private val _downloading = MutableStateFlow(false)
     val downloading: StateFlow<Boolean> = _downloading.asStateFlow()
+
+    init {
+        // DownloadService does the actual work (see its class doc for why), independently of
+        // whether this ViewModel - or any UI - is even around to see it; this just mirrors its
+        // progress back into the list exactly like the old fragment-local callbacks did,
+        // whenever the app happens to be in the foreground to show it.
+        viewModelScope.launch {
+            DownloadEvents.events.collect { event ->
+                when (event) {
+                    is DownloadEvent.Progress -> updateItem(event.id) { it.copy(progress = event.percent) }
+                    is DownloadEvent.Done -> updateItem(event.id) {
+                        it.copy(
+                            status = if (event.success) DownloadStatus.DONE else DownloadStatus.ERROR,
+                            errorMessage = event.error
+                        )
+                    }
+                    is DownloadEvent.BatchFinished -> setDownloading(false)
+                }
+            }
+        }
+    }
 
     // 0 = off. Only affects items with a known durationMs (see isVisibleForMinDuration) - a
     // stream (whose length lives in its manifest, never extracted here) or anything whose

@@ -20,6 +20,10 @@
     <string name="bookmark_list_empty">Noch keine Favoriten gespeichert</string>
     <string name="about_message">%1$s\nVersion %2$s</string>
 
+    <string name="download_notification_channel">Downloads</string>
+    <string name="download_notification_title">Video Downloader</string>
+    <string name="download_notification_progress">%1$d von %2$d Dateien fertig</string>
+
     <string name="no_media_found">Keine Videos oder GIFs auf dieser Seite gefunden</string>
     <string name="scan_failed">Seite konnte nicht durchsucht werden</string>
 

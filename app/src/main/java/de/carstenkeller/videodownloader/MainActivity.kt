@@ -1,7 +1,9 @@
 package de.carstenkeller.videodownloader
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Build
@@ -23,6 +25,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.addCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
@@ -68,6 +71,13 @@ class MainActivity : AppCompatActivity() {
     // thread; cleared on an actual host change, same as the media list.
     private val detectedStreamUrls = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
+    // The result itself needs no handling: DownloadService's foreground notification still
+    // runs and keeps the download alive either way (see its class doc) - without this
+    // permission (API 33+) that notification just stays invisible, which is a worse user
+    // experience but not a functional problem.
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -77,6 +87,7 @@ class MainActivity : AppCompatActivity() {
         setupWebView()
         setupCrawlerWebView()
         setupControls()
+        requestNotificationPermissionIfNeeded()
 
         onBackPressedDispatcher.addCallback(this) {
             if (customView != null) {
@@ -110,7 +121,6 @@ class MainActivity : AppCompatActivity() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 binding.progressBar.visibility = View.VISIBLE
                 if (url != null) binding.addressBar.setText(url)
-                updateBookmarkIcon(url)
 
                 // Only clear the media list when navigating to a genuinely different site
                 // (different host). Many pages reload/paginate within the same site while
@@ -127,7 +137,6 @@ class MainActivity : AppCompatActivity() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 binding.progressBar.visibility = View.GONE
                 if (url != null) binding.addressBar.setText(url)
-                updateBookmarkIcon(url)
             }
 
             override fun shouldInterceptRequest(
@@ -252,7 +261,6 @@ class MainActivity : AppCompatActivity() {
         binding.btnForward.setOnClickListener { if (binding.webView.canGoForward()) binding.webView.goForward() }
         binding.btnReload.setOnClickListener { binding.webView.reload() }
         binding.btnScan.setOnClickListener { scanCurrentPage() }
-        binding.btnBookmark.setOnClickListener { toggleBookmark() }
         binding.btnMenu.setOnClickListener { showOverflowMenu() }
 
         binding.addressBar.setOnEditorActionListener { _, actionId, event ->
@@ -266,14 +274,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun updateBookmarkIcon(url: String?) {
-        val bookmarked = url != null && bookmarkStore.isBookmarked(url)
-        binding.btnBookmark.setImageResource(if (bookmarked) R.drawable.ic_star_filled else R.drawable.ic_star_outline)
-        binding.btnBookmark.contentDescription = getString(
-            if (bookmarked) R.string.action_bookmark_remove else R.string.action_bookmark_add
-        )
-    }
-
     private fun toggleBookmark() {
         val url = binding.webView.url ?: return
         if (bookmarkStore.isBookmarked(url)) {
@@ -283,20 +283,31 @@ class MainActivity : AppCompatActivity() {
             bookmarkStore.add(Bookmark(title = currentPageTitle?.takeIf { it.isNotBlank() } ?: url, url = url))
             Toast.makeText(this, R.string.bookmark_added, Toast.LENGTH_SHORT).show()
         }
-        updateBookmarkIcon(url)
     }
 
+    // Folded into the overflow menu rather than its own toolbar button - six icon buttons plus
+    // the address bar in one row left the bar looking cramped (see activity_main.xml). The
+    // label itself carries the on/off state (computed fresh each time the menu opens), so this
+    // doesn't need the icon-swapping updateBookmarkIcon() that a dedicated button would.
     private fun showOverflowMenu() {
+        val currentUrl = binding.webView.url
+        val isBookmarked = currentUrl != null && bookmarkStore.isBookmarked(currentUrl)
+
         val popup = android.widget.PopupMenu(this, binding.btnMenu)
-        popup.menu.add(0, 0, 0, R.string.menu_show_bookmarks)
-        popup.menu.add(0, 1, 1, R.string.menu_about)
+        popup.menu.add(0, 0, 0, if (isBookmarked) R.string.action_bookmark_remove else R.string.action_bookmark_add)
+        popup.menu.add(0, 1, 1, R.string.menu_show_bookmarks)
+        popup.menu.add(0, 2, 2, R.string.menu_about)
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 0 -> {
-                    showBookmarkList()
+                    toggleBookmark()
                     true
                 }
                 1 -> {
+                    showBookmarkList()
+                    true
+                }
+                2 -> {
                     showAboutDialog()
                     true
                 }
@@ -304,6 +315,13 @@ class MainActivity : AppCompatActivity() {
             }
         }
         popup.show()
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
 
     private fun showBookmarkList() {
