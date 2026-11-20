@@ -23,9 +23,13 @@ jobs:
           java-version: "17"
           cache: gradle
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
+      # No explicit SDK setup step: ubuntu-latest already ships a pre-installed Android SDK
+      # with its licenses pre-accepted (ANDROID_HOME/ANDROID_SDK_ROOT already set), which is
+      # all Gradle needs to fetch the exact platform/build-tools versions this project
+      # declares. android-actions/setup-android@v3 started failing here - its sdkmanager call
+      # tries to install the long-removed legacy 'tools' package and exits 1 - which is a
+      # break in that action/SDK repository, not anything in this project; removing the
+      # redundant step sidesteps it entirely instead of chasing a pinned-version workaround.
       - name: Make gradlew executable
         run: chmod +x gradlew
 
